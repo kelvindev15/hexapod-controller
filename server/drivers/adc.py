@@ -1,5 +1,9 @@
 import smbus  # Import the smbus module for I2C communication
 import time  # Import the time module for sleep functionality
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 class ADC:
     def __init__(self):
@@ -11,12 +15,12 @@ class ADC:
 
     def scan_i2c_bus(self) -> list:
         """Scan the I2C bus for connected devices."""
-        print("Scanning I2C bus...")                                          # Print a message indicating the start of I2C bus scanning
+        logger.info("Scanning I2C bus")
         iic_addr = [None]
         for device in range(128):                                             # Iterate over possible I2C addresses (0 to 127)
             try:
                 self.i2c_bus.read_byte_data(device, 0)                        # Try to read data from the current device address
-                print(f"Device found at address: 0x{device:02X}")             # Print the address of the found device
+                logger.info("I2C device found address=0x%02X", device)
                 iic_addr.append(device)                                       # Return the address of the found device
             except OSError:
                 pass
@@ -31,11 +35,15 @@ class ADC:
 
     def read_channel_voltage(self, channel: int) -> float:
         """Read the ADC value for the specified channel using ADS7830."""
-        command_set = self.ADS7830_COMMAND | ((((channel << 2) | (channel >> 1)) & 0x07) << 4)  # Calculate the command set for the specified channel
-        self.i2c_bus.write_byte(self.I2C_ADDRESS, command_set)                # Write the command set to the ADC
-        value = self._read_stable_byte()                                      # Read a stable byte from the ADC
-        voltage = value / 255.0 * 5 * self.adc_voltage_coefficient                # Convert the ADC value to voltage
-        return round(voltage, 2)                                              # Return the voltage rounded to 2 decimal places
+        try:
+            command_set = self.ADS7830_COMMAND | ((((channel << 2) | (channel >> 1)) & 0x07) << 4)  # Calculate the command set for the specified channel
+            self.i2c_bus.write_byte(self.I2C_ADDRESS, command_set)                # Write the command set to the ADC
+            value = self._read_stable_byte()                                      # Read a stable byte from the ADC
+            voltage = value / 255.0 * 5 * self.adc_voltage_coefficient                # Convert the ADC value to voltage
+            return round(voltage, 2)                                              # Return the voltage rounded to 2 decimal places
+        except Exception:
+            logger.exception("ADC channel read failed channel=%s", channel)
+            raise
 
     def read_battery_voltage(self) -> float:
         """Read the battery voltage using ADS7830."""

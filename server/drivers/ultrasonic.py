@@ -1,6 +1,10 @@
 from gpiozero import DistanceSensor, PWMSoftwareFallback, DistanceSensorNoEcho
 import warnings
 import time
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 class Ultrasonic:
     def __init__(self, trigger_pin: int = 27, echo_pin: int = 22, max_distance: float = 3.0):
@@ -29,7 +33,7 @@ class Ultrasonic:
             distance = self.sensor.distance * 100  # Get the distance in centimeters
             return round(float(distance), 1)  # Return the distance rounded to one decimal place
         except RuntimeWarning as e:
-            print(f"Warning: {e}")
+            logger.warning("Ultrasonic read warning: %s", e)
             return None
 
     def close(self):

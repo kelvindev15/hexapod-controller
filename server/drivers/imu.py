@@ -2,8 +2,12 @@
 import time
 import math
 import os
-from kalman import Kalman_filter
+import logging
+from ..utils.kalman import Kalman_filter
 from mpu6050 import mpu6050
+
+
+logger = logging.getLogger(__name__)
 
 class IMU:
     def __init__(self):
@@ -128,7 +132,7 @@ class IMU:
         return self.pitch_angle, self.roll_angle, self.yaw_angle
 
     def handle_exception(self, exception):
-        print(exception)
+        logger.exception("IMU exception encountered")
         os.system("i2cdetect -y 1")
         raise exception
 

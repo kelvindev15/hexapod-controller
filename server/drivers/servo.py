@@ -1,6 +1,10 @@
 # coding:utf-8
-from pca9685 import PCA9685
+from .pca9685 import PCA9685
 import time
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 def map_value(value, from_low, from_high, to_low, to_high):
     """Map a value from one range to another."""
@@ -23,15 +27,19 @@ class Servo:
         :param channel: Servo channel (0-31)
         :param angle: Angle in degrees (0-180)
         """
-        if channel < 16:
-            duty_cycle = map_value(angle, 0, 180, 500, 2500)
-            duty_cycle = map_value(duty_cycle, 0, 20000, 0, 4095)
-            self.pwm_41.set_pwm(channel, 0, int(duty_cycle))
-        elif channel >= 16 and channel < 32:
-            channel -= 16
-            duty_cycle = map_value(angle, 0, 180, 500, 2500)
-            duty_cycle = map_value(duty_cycle, 0, 20000, 0, 4095)
-            self.pwm_40.set_pwm(channel, 0, int(duty_cycle))
+        try:
+            if channel < 16:
+                duty_cycle = map_value(angle, 0, 180, 500, 2500)
+                duty_cycle = map_value(duty_cycle, 0, 20000, 0, 4095)
+                self.pwm_41.set_pwm(channel, 0, int(duty_cycle))
+            elif channel >= 16 and channel < 32:
+                channel -= 16
+                duty_cycle = map_value(angle, 0, 180, 500, 2500)
+                duty_cycle = map_value(duty_cycle, 0, 20000, 0, 4095)
+                self.pwm_40.set_pwm(channel, 0, int(duty_cycle))
+        except Exception:
+            logger.exception("Servo set angle failed channel=%s angle=%s", channel, angle)
+            raise
 
     def relax(self):
         """Relax all servos by setting their PWM values to 4096."""

@@ -1,10 +1,14 @@
 import time
+import logging
 from picamera2 import Picamera2, Preview
 from picamera2.encoders import H264Encoder, JpegEncoder
 from picamera2.outputs import FileOutput
 from libcamera import Transform
 from threading import Condition
 import io
+
+
+logger = logging.getLogger(__name__)
 
 class StreamingOutput(io.BufferedIOBase):
     def __init__(self):
@@ -25,7 +29,7 @@ class Camera:
         try:
             self.camera = Picamera2()  # Initialize the Picamera2 object
         except IndexError:
-            print("Error: No available camera device found.")
+            logger.error("No available camera device found")
             return
 
         self.transform = Transform(hflip=1 if hflip else 0, vflip=1 if vflip else 0)  # Set the transformation for flipping the image
@@ -49,7 +53,7 @@ class Camera:
             metadata = self.camera.capture_file(filename)  # Capture an image and save it to the specified file
             return metadata                              # Return the metadata of the captured image
         except Exception as e:
-            print(f"Error capturing image: {e}")         # Print error message if capturing fails
+            logger.exception("Failed to capture image filename=%s", filename)
             return None                                  # Return None if capturing fails
 
     def start_stream(self, filename: str = None) -> None:
@@ -75,7 +79,7 @@ class Camera:
                 self.camera.stop_recording()               # Stop the recording or streaming
                 self.streaming = False                     # Set the streaming flag to False
             except Exception as e:
-                print(f"Error stopping stream: {e}")       # Print error message if stopping fails
+                logger.exception("Failed to stop camera stream")
 
     def get_frame(self) -> bytes:
         """Get the current frame from the streaming output."""

@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import os
 import time
 import math
 import copy
@@ -6,10 +7,10 @@ import threading
 import numpy as np
 from gpiozero import OutputDevice
 
-from pid import Incremental_PID
-from command import COMMAND as cmd
-from imu import IMU
-from servo import Servo
+from ..utils.pid import Incremental_PID
+from .command import COMMAND as cmd
+from ..drivers.imu import IMU
+from ..drivers.servo import Servo
 
 class Control:
     def __init__(self):
@@ -25,6 +26,10 @@ class Control:
         self.body_height = -25
         self.body_points = [[137.1, 189.4, self.body_height], [225, 0, self.body_height], [137.1, -189.4, self.body_height], 
                            [-137.1, -189.4, self.body_height], [-225, 0, self.body_height], [-137.1, 189.4, self.body_height]]
+        
+        # Determine the path for the config directory relative to this file
+        self.config_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config')
+        
         self.calibration_leg_positions = self.read_from_txt('point')
         self.leg_positions = [[140, 0, 0], [140, 0, 0], [140, 0, 0], [140, 0, 0], [140, 0, 0], [140, 0, 0]]
         self.calibration_angles = [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]]
@@ -36,13 +41,15 @@ class Control:
         self.Thread_conditiona = threading.Condition()
 
     def read_from_txt(self, filename):
-        with open(filename + ".txt", "r") as file:
+        file_path = os.path.join(self.config_dir, filename + ".txt")
+        with open(file_path, "r") as file:
             lines = file.readlines()
             data = [list(map(int, line.strip().split("\t"))) for line in lines]
         return data
 
     def save_to_txt(self, data, filename):
-        with open(filename + '.txt', 'w') as file:
+        file_path = os.path.join(self.config_dir, filename + '.txt')
+        with open(file_path, 'w') as file:
             for row in data:
                 file.write('\t'.join(map(str, row)) + '\n')
 
@@ -81,8 +88,8 @@ class Control:
             self.calibration_angles[i][1] = self.calibration_angles[i][1] - self.current_angles[i][1]
             self.calibration_angles[i][2] = self.calibration_angles[i][2] - self.current_angles[i][2]
 
-    def set_leg_angles(self):
-        if self.check_point_validity():
+    def set_leg_angles(self, skip_validity=False):
+        if skip_validity or self.check_point_validity():
             for i in range(6):
                 self.current_angles[i][0], self.current_angles[i][1], self.current_angles[i][2] = self.coordinate_to_angle(
                     -self.leg_positions[i][2], self.leg_positions[i][0], self.leg_positions[i][1])
