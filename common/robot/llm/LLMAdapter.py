@@ -61,9 +61,12 @@ class LLMAdapter:
                                 {
                                     "type": "object",
                                     "properties": {
-                                        "value": {"type": "number"}
+                                        "value": {"type": "number"},
+                                        "forward": {"type": "number"},
+                                        "turn": {"type": "number"},
+                                        "angle": {"type": "number"},
+                                        "distance": {"type": "number"},
                                     },
-                                    "required": ["value"],
                                     "additionalProperties": True,
                                 }
                             ]
@@ -74,23 +77,138 @@ class LLMAdapter:
                                 {
                                     "type": "object",
                                     "properties": {
-                                        "value": {"type": "number"}
+                                        "value": {"type": "number"},
+                                        "forward": {"type": "number"},
+                                        "turn": {"type": "number"},
+                                        "angle": {"type": "number"},
+                                        "distance": {"type": "number"},
                                     },
-                                    "required": ["value"],
                                     "additionalProperties": True,
                                 }
                             ]
                         },
                     },
                     "required": ["command"],
-                    "anyOf": [
-                        {"required": ["params"]},
-                        {"required": ["parameters"]}
-                    ],
                 }
             },
             "required": ["goal", "scene_description", "reasoning", "action"],
         }
+        self._install_system_instruction()
+
+    def _install_system_instruction(self) -> None:
+        if not hasattr(self.chat, "set_system_instruction"):
+            return
+        if not callable(getattr(self.chat, "set_system_instruction", None)):
+            return
+
+        self.chat.set_system_instruction(
+            (
+                "You are a motion planner for a hexapod robot. "
+                "Always respond with exactly one valid JSON object and no extra text. "
+                "Allowed action.command values: FRONT, BACK, ROTATE_LEFT, ROTATE_RIGHT, STOP, RELAX, BALANCE, COMPLETE. "
+                "Use this JSON shape: "
+                '{"goal":"...","scene_description":"...","reasoning":"...",'
+                '"action":{"command":"FRONT","params":{"value":10}}}. '
+                "For movement, params.value must be numeric. "
+                "When goal is complete, use command COMPLETE."
+            )
+        )
+
+    def _to_float_or_none(self, value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _canonical_command(self, command: str, raw_params) -> str:
+        token = str(command or "").strip().upper().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "FORWARD": "FRONT",
+            "MOVE_FORWARD": "FRONT",
+            "GO_FORWARD": "FRONT",
+            "BACKWARD": "BACK",
+            "MOVE_BACK": "BACK",
+            "MOVE_BACKWARD": "BACK",
+            "GO_BACK": "BACK",
+            "TURN_LEFT": "ROTATE_LEFT",
+            "LEFT": "ROTATE_LEFT",
+            "TURN_RIGHT": "ROTATE_RIGHT",
+            "RIGHT": "ROTATE_RIGHT",
+            "HALT": "STOP",
+            "DONE": "COMPLETE",
+            "FINISH": "COMPLETE",
+            "SUCCESS": "COMPLETE",
+        }
+        if token in aliases:
+            return aliases[token]
+
+        if token in {"MOVE", "WALK", "TURN", "ROTATE"} and isinstance(raw_params, dict):
+            turn = self._to_float_or_none(raw_params.get("turn"))
+            if turn is None:
+                turn = self._to_float_or_none(raw_params.get("angle"))
+            forward = self._to_float_or_none(raw_params.get("forward"))
+            if forward is None:
+                forward = self._to_float_or_none(raw_params.get("distance"))
+
+            if turn is not None and abs(turn) > 1e-6:
+                return "ROTATE_RIGHT" if turn > 0 else "ROTATE_LEFT"
+            if forward is not None and abs(forward) > 1e-6:
+                return "FRONT" if forward > 0 else "BACK"
+
+        return token
+
+    def _extract_value(self, command: str, raw_params) -> float:
+        numeric = self._to_float_or_none(raw_params)
+        if numeric is not None:
+            return numeric
+
+        if not isinstance(raw_params, dict):
+            return 0.0
+
+        command_keys = {
+            "FRONT": ["value", "forward", "distance", "amount", "cm", "meters", "m"],
+            "BACK": ["value", "forward", "distance", "amount", "cm", "meters", "m"],
+            "ROTATE_LEFT": ["value", "turn", "angle", "degrees", "deg"],
+            "ROTATE_RIGHT": ["value", "turn", "angle", "degrees", "deg"],
+        }
+
+        for key in command_keys.get(command, ["value", "forward", "turn", "angle", "distance"]):
+            if key in raw_params:
+                candidate = self._to_float_or_none(raw_params.get(key))
+                if candidate is not None:
+                    return candidate
+
+        return 0.0
+
+    def _canonicalize_response(self, action_obj: dict) -> dict:
+        if not isinstance(action_obj, dict):
+            raise ValueError("LLM response must be a JSON object")
+
+        action_raw = action_obj.get("action")
+        if not isinstance(action_raw, dict):
+            raise ValueError("LLM response action field must be an object")
+
+        raw_params = action_raw.get("params")
+        if raw_params is None:
+            raw_params = action_raw.get("parameters")
+        if raw_params is None and "value" in action_raw:
+            raw_params = action_raw.get("value")
+
+        command = self._canonical_command(action_raw.get("command", ""), raw_params)
+        value = self._extract_value(command, raw_params)
+        if command in {"BACK", "ROTATE_LEFT"}:
+            value = abs(value)
+
+        canonical = dict(action_obj)
+        canonical.setdefault("goal", "")
+        canonical.setdefault("scene_description", "")
+        canonical.setdefault("reasoning", "")
+        canonical["action"] = {
+            **action_raw,
+            "command": command,
+            "params": {"value": value},
+        }
+        return canonical
 
     def clear(self):
         self.chat.clear_chat()
@@ -152,6 +270,7 @@ class LLMAdapter:
         try:
             extracted = extractJSON(response)
             action_obj = json.loads(extracted)
+            action_obj = self._canonicalize_response(action_obj)
         except Exception as e:
             logger.warning("Failed to extract/parse JSON from LLM response", exc_info=True)
             return Result.failure(InvalidJSON(response))

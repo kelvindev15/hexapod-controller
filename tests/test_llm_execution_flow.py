@@ -55,12 +55,16 @@ class FakeChat:
     def __init__(self, responses):
         self.responses = list(responses)
         self.chat_id = None
+        self.system_instruction = None
 
     def clear_chat(self):
         return None
 
     def set_chat_id(self, chat_id: str):
         self.chat_id = chat_id
+
+    def set_system_instruction(self, system_instruction: str):
+        self.system_instruction = system_instruction
 
     async def send_message(self, _message):
         if not self.responses:
@@ -124,6 +128,37 @@ class LLMExecutionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.value.type, ActionType.WALK)
         self.assertEqual(result.value.metadata["command"], "FRONT")
         self.assertEqual(result.value.params["y"], 12.0)
+
+    async def test_action_normalization_from_forward_turn_payload(self):
+        chat = FakeChat([
+            '{"goal": "move", "scene_description": "clear", "reasoning": "safe", "action": {"command": "MOVE", "parameters": {"forward": 8, "turn": 0}}}'
+        ])
+        adapter = LLMAdapter(chat)
+
+        result = await adapter.iterate("goal", "image")
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.value.type, ActionType.WALK)
+        self.assertEqual(result.value.metadata["command"], "FRONT")
+        self.assertEqual(result.value.params["y"], 8.0)
+
+    async def test_complete_without_parameters_is_accepted(self):
+        chat = FakeChat([
+            '{"goal": "done", "scene_description": "done", "reasoning": "goal reached", "action": {"command": "COMPLETE"}}'
+        ])
+        adapter = LLMAdapter(chat)
+
+        result = await adapter.iterate("goal", "image")
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.value.type, ActionType.COMPLETE)
+
+    async def test_adapter_sets_system_instruction_on_chat(self):
+        chat = FakeChat(["{}"])
+        LLMAdapter(chat)
+
+        self.assertIsNotNone(chat.system_instruction)
+        self.assertIn("valid JSON object", chat.system_instruction)
 
     async def test_malformed_llm_response_returns_failure(self):
         chat = FakeChat(["this is not json"])

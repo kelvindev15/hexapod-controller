@@ -42,6 +42,11 @@ python interactive_runner.py --dry-run --llm-provider openai
 
 - Any input without `/` is treated as a natural-language goal and forwarded to the LLM controller.
 
+## Command History
+
+- The prompt supports terminal history navigation with `↑`/`↓` arrows.
+- History is persisted across runs in `~/.hexapod_history`.
+
 ## Example Goal Prompts
 
 - `Move forward slowly until you are about 30 cm from obstacles, then stop.`

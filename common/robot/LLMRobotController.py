@@ -1,6 +1,7 @@
 import asyncio
 import uuid
 import logging
+from typing import TYPE_CHECKING
 from common.utils.logging_config import bootstrap_logging
 from common.llm.chats import LLMChat
 from common.utils.images import toBase64Image
@@ -8,19 +9,26 @@ from common.utils.robot import getDistancesFromLidar, getDistanceDescription
 from common.robot.RobotController import RobotController
 from common.robot.llm.ActionAdapter import ActionAdapter, ActionStatus
 from common.robot.llm.LLMAdapter import LLMAdapter
-from server.core.motion_executor import MotionExecutor
 from server.core.motion_schema import ActionType
+
+if TYPE_CHECKING:
+    from server.core.motion_executor import MotionExecutor
 
 logger = logging.getLogger(__name__)
 
 class LLMRobotController:
 
-    def __init__(self, robotController: RobotController, chat: LLMChat, motionExecutor: MotionExecutor | None = None):
+    def __init__(self, robotController: RobotController, chat: LLMChat, motionExecutor: "MotionExecutor | None" = None):
         bootstrap_logging()
         self.robot = robotController
         self.chat = chat
         self.llmAdapter = LLMAdapter(chat)
-        self.motionExecutor = motionExecutor or MotionExecutor()
+        if motionExecutor is None:
+            from server.core.motion_executor import MotionExecutor
+
+            self.motionExecutor = MotionExecutor()
+        else:
+            self.motionExecutor = motionExecutor
         self.motionExecutor.start()
         self.actionAdapter = ActionAdapter(self.motionExecutor)
         self.sessionLock = asyncio.Lock()

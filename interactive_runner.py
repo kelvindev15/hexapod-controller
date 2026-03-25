@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
+import atexit
+import os
+import readline
 import shlex
 import sys
 import time
@@ -244,8 +247,28 @@ def create_chat(provider: str, model_name: str | None):
     return OllamaChat(model_name=model_name or "llava")
 
 
+def setup_cli_history() -> None:
+    history_path = os.path.expanduser("~/.hexapod_history")
+    try:
+        if os.path.exists(history_path):
+            readline.read_history_file(history_path)
+    except Exception:
+        return
+
+    readline.set_history_length(1000)
+
+    def _save_history() -> None:
+        try:
+            readline.write_history_file(history_path)
+        except Exception:
+            pass
+
+    atexit.register(_save_history)
+
+
 def main() -> int:
     bootstrap_logging()
+    setup_cli_history()
     args = build_parser().parse_args()
 
     if args.dry_run:

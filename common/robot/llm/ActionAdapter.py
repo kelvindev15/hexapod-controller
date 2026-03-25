@@ -1,11 +1,14 @@
 import asyncio
 import logging
+from typing import TYPE_CHECKING
 from common.robot.llm.RobotAction import RobotAction
 import numpy as np
 from dataclasses import dataclass
 from enum import Enum
-from server.core.motion_executor import MotionExecutor
 from server.core.motion_schema import Action, ActionType, ActionSafetyPolicy, SafetyContext, SafetyDecision
+
+if TYPE_CHECKING:
+    from server.core.motion_executor import MotionExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +25,7 @@ class ActionResult:
 
 class ActionAdapter:
 
-    def __init__(self, motion_executor: MotionExecutor):
+    def __init__(self, motion_executor: "MotionExecutor"):
         self.motion_executor = motion_executor
         self.safety_policy = ActionSafetyPolicy()
 

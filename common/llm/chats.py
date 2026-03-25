@@ -2,13 +2,19 @@ from abc import ABC
 import asyncio
 import threading
 import logging
-import langsmith as ls
 from langchain_core.rate_limiters import InMemoryRateLimiter
 from langchain_core.messages.base import BaseMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_ollama import ChatOllama
-from langchain_openai import ChatOpenAI
-from openai import RateLimitError
+
+try:
+    import langsmith as ls
+except ImportError:
+    ls = None
+
+try:
+    from openai import RateLimitError
+except ImportError:
+    class RateLimitError(Exception):
+        pass
 
 from common.utils.llm import create_sys_message, geminiAPIKey, getOpenAIKey
 
@@ -21,6 +27,14 @@ rate_limiter = InMemoryRateLimiter(
     check_every_n_seconds=1
 )
 
+
+def traceable():
+    if ls is None:
+        def _identity(func):
+            return func
+        return _identity
+    return ls.traceable()
+
 class LLMChat(ABC):
     def __init__(self):
         self.llm = None
@@ -32,14 +46,16 @@ class LLMChat(ABC):
         self._chat_state_lock = threading.RLock()
         self.clear_chat()
 
-    @ls.traceable()
+    @traceable()
     async def send_message(self, message: BaseMessage):    
         self.__checkInitilization()
         async with self._send_lock:
-            rt = ls.get_current_run_tree()
-            rt.metadata["experiment_id"] = self.chat_id
-            rt.metadata["session_id"] = self.chat_id
-            rt.tags.extend(["WEBOTS"])
+            if ls is not None:
+                rt = ls.get_current_run_tree()
+                if rt is not None:
+                    rt.metadata["experiment_id"] = self.chat_id
+                    rt.metadata["session_id"] = self.chat_id
+                    rt.tags.extend(["WEBOTS"])
             with self._chat_state_lock:
                 self.chat.append(message)
                 if len(self.chat) == 4:
@@ -115,6 +131,8 @@ class LLMChat(ABC):
 class GeminiChat(LLMChat):
     def __init__(self, model_name="gemini-2.0-flash"):
         super().__init__()
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
         self.model_name = model_name
         self.llm = ChatGoogleGenerativeAI(
             model=model_name,
@@ -129,6 +147,8 @@ class GeminiChat(LLMChat):
 class OllamaChat(LLMChat):
     def __init__(self, model_name="llava"):
         super().__init__()
+        from langchain_ollama import ChatOllama
+
         self.model_name = model_name
         self.llm = ChatOllama(
             model=model_name,
@@ -138,6 +158,8 @@ class OllamaChat(LLMChat):
 class OpenAIChat(LLMChat):
     def __init__(self, model_name="gpt-4o-mini"):
         super().__init__()
+        from langchain_openai import ChatOpenAI
+
         self.model_name = model_name
         self.llm = ChatOpenAI(
             model=model_name,
