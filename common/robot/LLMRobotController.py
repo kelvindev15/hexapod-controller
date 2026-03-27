@@ -23,13 +23,17 @@ class LLMRobotController:
         self.robot = robotController
         self.chat = chat
         self.llmAdapter = LLMAdapter(chat)
-        if motionExecutor is None:
+        if motionExecutor is not None:
+            self.motionExecutor = motionExecutor
+        elif hasattr(robotController, "submit_action"):
+            self.motionExecutor = robotController
+        else:
             from server.core.motion_executor import MotionExecutor
 
             self.motionExecutor = MotionExecutor()
-        else:
-            self.motionExecutor = motionExecutor
-        self.motionExecutor.start()
+
+        if hasattr(self.motionExecutor, "start") and callable(getattr(self.motionExecutor, "start", None)):
+            self.motionExecutor.start()
         self.actionAdapter = ActionAdapter(self.motionExecutor)
         self.sessionLock = asyncio.Lock()
 

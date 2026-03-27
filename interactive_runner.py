@@ -105,6 +105,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use an in-memory executor instead of hardware motion executor",
     )
     parser.add_argument(
+        "--mode",
+        choices=["local", "dry-run", "remote"],
+        default="local",
+        help="Runner mode: local hardware executor, dry-run executor, or remote robot service",
+    )
+    parser.add_argument(
+        "--robot-url",
+        default=os.environ.get("HEXAPOD_ROBOT_URL", "http://127.0.0.1:8080"),
+        help="Robot service base URL used in --mode remote",
+    )
+    parser.add_argument(
         "--llm-provider",
         choices=["openai", "gemini", "ollama"],
         default="openai",
@@ -271,22 +282,32 @@ def main() -> int:
     setup_cli_history()
     args = build_parser().parse_args()
 
-    if args.dry_run:
+    mode = "dry-run" if args.dry_run else args.mode
+
+    if mode == "dry-run":
         executor = DryRunExecutor()
         print("Started in dry-run mode (no hardware access).")
+        robot_bridge = InteractiveRobotBridge(executor)
+    elif mode == "remote":
+        from common.robot.RemoteRobotController import RemoteRobotController
+
+        executor = RemoteRobotController(base_url=args.robot_url)
+        robot_bridge = executor
+        print(f"Started in remote mode (robot service: {args.robot_url}).")
     else:
         try:
             from server.core.motion_executor import MotionExecutor
 
             executor = MotionExecutor()
             print("Started in live mode (hardware motion executor).")
+            robot_bridge = InteractiveRobotBridge(executor)
         except Exception as exc:
             print(f"Failed to initialize live executor: {exc}")
             print("Retry with --dry-run to test interactively without hardware.")
             return 1
 
-    executor.start()
-    robot_bridge = InteractiveRobotBridge(executor)
+    if hasattr(executor, "start") and callable(getattr(executor, "start", None)):
+        executor.start()
 
     llm_controller = None
     try:
@@ -348,7 +369,8 @@ def main() -> int:
             executor.submit_action(Action(type=ActionType.STOP))
         except Exception:
             pass
-        executor.stop()
+        if hasattr(executor, "stop") and callable(getattr(executor, "stop", None)):
+            executor.stop()
 
     return 0
 
