@@ -2,7 +2,14 @@
 import argparse
 import json
 import logging
+import os
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from common.utils.logging_config import bootstrap_logging
 from server.core.api_contract import ContractValidationError, action_from_dict, action_to_dict, world_state_to_dict
