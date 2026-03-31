@@ -36,6 +36,15 @@ class LLMRobotController:
             self.motionExecutor.start()
         self.actionAdapter = ActionAdapter(self.motionExecutor)
         self.sessionLock = asyncio.Lock()
+        self._interrupt_requested = False
+        self._session_task: asyncio.Task | None = None
+
+    def interrupt(self) -> bool:
+        was_running = self.sessionLock.locked()
+        self._interrupt_requested = True
+        if self._session_task is not None and not self._session_task.done():
+            self._session_task.cancel()
+        return was_running
 
     def __buildSceneDescription(self, prompt = None) -> str:
         preamble = f"Goal: {prompt}" if prompt is not None else "Here is the current view of the robot."
@@ -62,14 +71,22 @@ class LLMRobotController:
             return
 
         await self.sessionLock.acquire()
+        self._interrupt_requested = False
+        self._session_task = asyncio.current_task()
         chat_id = str(uuid.uuid4())
         self.llmAdapter.clear()
         self.chat.set_chat_id(chat_id)
         logger.info("LLM session started chat_id=%s max_iterations=%d", chat_id, maxIterations)
         iterations = 0
         try:
+            if self._interrupt_requested:
+                return
             response = await self.llmAdapter.iterate(await self.__getSceneDescription(prompt), await self.__getCameraImageBase64())
-            while iterations < maxIterations and not(response.ok and response.value.type == ActionType.COMPLETE):
+            while (
+                iterations < maxIterations
+                and not self._interrupt_requested
+                and not (response.ok and response.value.type == ActionType.COMPLETE)
+            ):
                 iterations += 1
                 logger.info("LLM iteration chat_id=%s iteration=%d/%d", chat_id, iterations, maxIterations)
                 if response.ok:
@@ -78,11 +95,16 @@ class LLMRobotController:
                         try:
                             actionTask = asyncio.create_task(self.actionAdapter.execute(response.value))
                             await asyncio.wait_for(actionTask, 30)
+                        except asyncio.CancelledError:
+                            logger.info("LLM action execution interrupted chat_id=%s", chat_id)
+                            break
                         except asyncio.TimeoutError:
                             logger.warning("Action execution timed out")
                             break
 
                         actionResult = await actionTask
+                        if self._interrupt_requested:
+                            break
                         if actionResult.status == ActionStatus.SUCCESS:
                             response = await self.llmAdapter.iterate(await self.__getSceneDescription(prompt), await self.__getCameraImageBase64())
                         else:
@@ -110,10 +132,17 @@ class LLMRobotController:
                         f"Received Error: {response.error}\n"
                     )
                     response = await self.llmAdapter.iterate(await self.__getSceneDescription(f"{prompt}\n{message}"), await self.__getCameraImageBase64())
+            if self._interrupt_requested:
+                logger.info("LLM session interrupted chat_id=%s", chat_id)
+        except asyncio.CancelledError:
+            self._interrupt_requested = True
+            logger.info("LLM session cancelled chat_id=%s", chat_id)
         except Exception:
             logger.exception("Error in LLMRobotController.ask chat_id=%s", chat_id)
         finally:
+            self._session_task = None
             # always release the lock
-            self.sessionLock.release()
+            if self.sessionLock.locked():
+                self.sessionLock.release()
             logger.info("LLM session ended chat_id=%s iterations=%d", chat_id, iterations)
     

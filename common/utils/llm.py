@@ -46,9 +46,9 @@ def _load_env_file() -> None:
 
 def geminiAPIKey():
     _load_env_file()
-    api_key = os.environ.get('GEMINI_API_KEY')
+    api_key = os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY')
     if not api_key:
-        raise ValueError("GEMINI_API_KEY environment variable not set")
+        raise ValueError("Gemini API key not set (expected GEMINI_API_KEY or GOOGLE_API_KEY)")
     return api_key
 
 

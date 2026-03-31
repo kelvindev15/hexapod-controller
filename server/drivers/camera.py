@@ -56,6 +56,23 @@ class Camera:
             logger.exception("Failed to capture image filename=%s", filename)
             return None                                  # Return None if capturing fails
 
+    def capture_array(self):
+        """Capture an image and return it as a numpy array."""
+        try:
+            was_started = self.camera.started
+            if not was_started:
+                self.camera.start()  # Start the camera if not already started
+            
+            image = self.camera.capture_array()  # Capture image as numpy array
+            
+            if not was_started:
+                self.camera.stop()  # Stop the camera if we started it
+            
+            return image
+        except Exception as e:
+            logger.exception("Failed to capture image array")
+            return None
+
     def start_stream(self, filename: str = None) -> None:
         """Start the video stream or recording."""
         if not self.streaming:

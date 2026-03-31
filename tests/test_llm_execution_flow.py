@@ -1,3 +1,4 @@
+import asyncio
 import sys
 import types
 import unittest
@@ -70,6 +71,16 @@ class FakeChat:
         if not self.responses:
             return "{}"
         return self.responses.pop(0)
+
+
+class SlowChat(FakeChat):
+    def __init__(self, delay_seconds: float = 1.0):
+        super().__init__(responses=[])
+        self.delay_seconds = delay_seconds
+
+    async def send_message(self, _message):
+        await asyncio.sleep(self.delay_seconds)
+        return '{"goal": "done", "scene_description": "done", "reasoning": "goal reached", "action": {"command": "COMPLETE"}}'
 
 
 class FakeRobot:
@@ -219,6 +230,21 @@ class LLMExecutionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(executor.started)
         self.assertEqual(len(executor.submitted), 1)
         self.assertEqual(executor.submitted[0].type, ActionType.WALK)
+
+    async def test_controller_session_can_be_interrupted(self):
+        chat = SlowChat(delay_seconds=1.0)
+        robot = FakeRobot()
+        executor = FakeMotionExecutor()
+        controller = LLMRobotController(robotController=robot, chat=chat, motionExecutor=executor)
+
+        ask_task = asyncio.create_task(controller.ask("move", maxIterations=3))
+        await asyncio.sleep(0.05)
+
+        self.assertTrue(controller.interrupt())
+
+        await asyncio.wait_for(ask_task, timeout=1.0)
+        self.assertFalse(controller.sessionLock.locked())
+        self.assertEqual(len(executor.submitted), 0)
 
 
 if __name__ == "__main__":

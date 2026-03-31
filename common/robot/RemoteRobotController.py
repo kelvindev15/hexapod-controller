@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import base64
 import json
 from urllib import error, request
 
+import cv2
 import numpy as np
 
 from common.robot.RobotController import RobotController
@@ -90,7 +92,15 @@ class RemoteRobotController(RobotController):
         self._request("POST", "/actions/stop", {})
 
     def getCameraImage(self):
-        return np.zeros((64, 64, 3), dtype=np.uint8)
+        try:
+            response = self._request("GET", "/camera")
+            if "image" in response:
+                image_bytes = base64.b64decode(response["image"])
+                nparr = np.frombuffer(image_bytes, np.uint8)
+                image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                return image
+        except Exception as exc:
+            raise RuntimeError(f"Failed to get camera image: {exc}") from exc
 
     def getLidarImage(self, fov_degrees: int, offset_degrees: int = 0):
         _ = offset_degrees

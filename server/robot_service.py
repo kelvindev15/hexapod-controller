@@ -12,8 +12,10 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from common.utils.logging_config import bootstrap_logging
+from common.utils.images import toBase64Image
 from server.core.api_contract import ContractValidationError, action_from_dict, action_to_dict, world_state_to_dict
 from server.core.motion_schema import Action, ActionType
+from server.drivers.camera import Camera
 
 
 logger = logging.getLogger(__name__)
@@ -22,9 +24,10 @@ logger = logging.getLogger(__name__)
 class RobotHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, server_address, request_handler_class, executor):
+    def __init__(self, server_address, request_handler_class, executor, camera=None):
         super().__init__(server_address, request_handler_class)
         self.executor = executor
+        self.camera = camera
 
 
 def create_handler():
@@ -74,6 +77,22 @@ def create_handler():
                 self._send_json(200, world_state_to_dict(state))
                 return
 
+            if self.path == "/camera":
+                try:
+                    if not self.server.camera:
+                        self._send_json(503, {"error": "Camera not available"})
+                        return
+                    image = self.server.camera.capture_array()
+                    if image is not None:
+                        base64_image = toBase64Image(image)
+                        self._send_json(200, {"image": base64_image})
+                        return
+                    self._send_json(500, {"error": "Failed to capture camera image"})
+                except Exception as exc:
+                    logger.exception("Failed to get camera image")
+                    self._send_json(500, {"error": str(exc)})
+                return
+
             self._send_json(404, {"error": "Not found"})
 
         def do_POST(self):
@@ -120,7 +139,15 @@ def main() -> int:
 
     executor = MotionExecutor()
     executor.start()
-    server = RobotHTTPServer((args.host, args.port), create_handler(), executor)
+    
+    camera = None
+    try:
+        camera = Camera()
+        logger.info("Camera initialized successfully")
+    except Exception as exc:
+        logger.warning("Camera initialization failed: %s", exc)
+    
+    server = RobotHTTPServer((args.host, args.port), create_handler(), executor, camera)
     logger.info("Robot service listening on %s:%d", args.host, args.port)
 
     try:
@@ -130,6 +157,11 @@ def main() -> int:
     finally:
         server.server_close()
         executor.stop()
+        if camera:
+            try:
+                camera.close()
+            except Exception as exc:
+                logger.warning("Error closing camera: %s", exc)
 
     return 0
 

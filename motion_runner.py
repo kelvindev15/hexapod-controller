@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
-import time
 import logging
+import os
+import sys
+import time
+
+
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 from common.utils.logging_config import bootstrap_logging
 from server.core.motion_executor import MotionExecutor
 from server.core.motion_schema import Action, ActionType

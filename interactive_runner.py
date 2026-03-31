@@ -8,8 +8,15 @@ import shlex
 import sys
 import time
 from dataclasses import asdict
+from datetime import datetime
 
+import cv2
 import numpy as np
+
+
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from common.utils.logging_config import bootstrap_logging
 from server.core.motion_schema import Action, ActionType, WorldState
@@ -82,7 +89,17 @@ class InteractiveRobotBridge:
         self.executor.submit_action(Action(type=ActionType.STOP))
 
     def getCameraImage(self):
-        return np.zeros((64, 64, 3), dtype=np.uint8)
+        try:
+            from server.drivers.camera import Camera
+            camera = Camera()
+            image = camera.capture_array()
+            camera.close()
+            if image is not None:
+                return image
+            return np.zeros((64, 64, 3), dtype=np.uint8)
+        except Exception as exc:
+            # Fallback to black image if camera is not available
+            return np.zeros((64, 64, 3), dtype=np.uint8)
 
     def getLidarImage(self, fov_degrees: int, offset_degrees: int = 0):
         _ = offset_degrees
@@ -141,6 +158,7 @@ def print_help() -> None:
 Commands:
     /help
     /state
+    /snapshot [output_path]
     /stop
     /relax
     /balance
@@ -152,6 +170,7 @@ Commands:
 
 Natural language goals:
     Any input that does not start with '/' is sent to the LLM controller.
+    Press Ctrl+C while an LLM goal is running to interrupt that session.
 
 Examples:
     Move forward carefully until you are 30 cm from the obstacle.
@@ -177,6 +196,35 @@ def format_state(state: WorldState) -> str:
 
 def parse_command(line: str) -> list[str]:
     return shlex.split(line.strip())
+
+
+def save_snapshot(robot_bridge, output_path: str | None = None) -> str:
+    image = robot_bridge.getCameraImage()
+    if image is None:
+        raise RuntimeError("Camera image is unavailable")
+
+    if not isinstance(image, np.ndarray):
+        image = np.array(image, dtype=np.uint8)
+
+    if image.size == 0:
+        raise RuntimeError("Camera image is empty")
+
+    if output_path:
+        snapshot_path = os.path.abspath(os.path.expanduser(output_path))
+        directory = os.path.dirname(snapshot_path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+    else:
+        snapshots_dir = os.path.join(PROJECT_ROOT, "snapshots")
+        os.makedirs(snapshots_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        snapshot_path = os.path.join(snapshots_dir, f"snapshot_{timestamp}.jpg")
+
+    ok = cv2.imwrite(snapshot_path, image)
+    if not ok:
+        raise RuntimeError(f"Failed to write snapshot to {snapshot_path}")
+
+    return snapshot_path
 
 
 def to_float(raw: str, name: str) -> float:
@@ -277,6 +325,32 @@ def setup_cli_history() -> None:
     atexit.register(_save_history)
 
 
+def run_llm_goal(
+    llm_event_loop: asyncio.AbstractEventLoop,
+    llm_controller,
+    goal: str,
+    max_iterations: int,
+) -> bool:
+    task = llm_event_loop.create_task(llm_controller.ask(goal, maxIterations=max_iterations))
+    interrupted = False
+    try:
+        llm_event_loop.run_until_complete(task)
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\nInterrupt requested. Stopping current LLM session...")
+        try:
+            llm_controller.interrupt()
+        except Exception:
+            pass
+        try:
+            llm_event_loop.run_until_complete(task)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+    return interrupted
+
+
 def main() -> int:
     bootstrap_logging()
     setup_cli_history()
@@ -310,15 +384,26 @@ def main() -> int:
         executor.start()
 
     llm_controller = None
+    llm_event_loop = None
+    llm_init_error = None
     try:
         from common.robot.LLMRobotController import LLMRobotController
 
+        llm_event_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(llm_event_loop)
         chat = create_chat(args.llm_provider, args.llm_model)
         llm_controller = LLMRobotController(robotController=robot_bridge, chat=chat, motionExecutor=executor)
         model_name = chat.get_model_name()
         print(f"LLM control enabled: provider={args.llm_provider} model={model_name}")
     except Exception as exc:
-        print(f"LLM initialization failed ({exc}).")
+        llm_init_error = f"{type(exc).__name__}: {exc}"
+        print(f"LLM initialization failed ({llm_init_error}).")
+        if args.llm_provider == "gemini":
+            print("Gemini setup: set GEMINI_API_KEY (or GOOGLE_API_KEY) and install langchain-google-genai.")
+        elif args.llm_provider == "openai":
+            print("OpenAI setup: set OPENAI_API_KEY and install langchain-openai.")
+        elif args.llm_provider == "ollama":
+            print("Ollama setup: run local Ollama service and ensure the model exists.")
         print("Manual slash commands remain available.")
 
     print_help()
@@ -343,6 +428,14 @@ def main() -> int:
                 if command == "state":
                     print(format_state(executor.get_state()))
                     continue
+                if command == "snapshot":
+                    if len(tokens) > 2:
+                        print("Usage: /snapshot [output_path]")
+                        continue
+                    output_path = tokens[1] if len(tokens) == 2 else None
+                    saved_path = save_snapshot(robot_bridge, output_path)
+                    print(f"saved snapshot to {saved_path}")
+                    continue
 
                 action = make_action(tokens)
                 executor.submit_action(action)
@@ -351,11 +444,16 @@ def main() -> int:
                 continue
 
             if llm_controller is None:
-                print("LLM is not configured. Use slash commands or fix LLM setup.")
+                if llm_init_error:
+                    print(f"LLM unavailable: {llm_init_error}")
+                else:
+                    print("LLM is not configured. Use slash commands or fix LLM setup.")
                 continue
 
             print(f"goal> {line}")
-            asyncio.run(llm_controller.ask(line, maxIterations=args.max_iterations))
+            interrupted = run_llm_goal(llm_event_loop, llm_controller, line, args.max_iterations)
+            if interrupted:
+                print("LLM session interrupted.")
             print(format_state(executor.get_state()))
     except KeyboardInterrupt:
         print("\nInterrupted.")
@@ -365,6 +463,12 @@ def main() -> int:
         print(f"Error: {exc}")
         return 1
     finally:
+        if llm_event_loop is not None:
+            try:
+                llm_event_loop.close()
+            except Exception:
+                pass
+            asyncio.set_event_loop(None)
         try:
             executor.submit_action(Action(type=ActionType.STOP))
         except Exception:
