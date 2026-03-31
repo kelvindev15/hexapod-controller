@@ -7,10 +7,22 @@ Use `interactive_runner.py` to control the robot from a terminal.
 - Live hardware mode:
 
 ```bash
-python interactive_runner.py --llm-provider openai
+python interactive_runner.py --mode local --llm-provider openai
 ```
 
 - Dry-run mode (no hardware):
+
+```bash
+python interactive_runner.py --mode dry-run --llm-provider openai
+```
+
+- Remote host mode (LLM on host, motion on robot device):
+
+```bash
+HEXAPOD_ROBOT_URL=http://<robot-ip>:8080 python interactive_runner.py --mode remote --llm-provider openai
+```
+
+Backwards-compatible shortcut for dry run still works:
 
 ```bash
 python interactive_runner.py --dry-run --llm-provider openai
@@ -34,6 +46,7 @@ python interactive_runner.py --dry-run --llm-provider openai
 
 - Input starting with `/` is treated as a direct command:
   - `/help`, `/state`, `/stop`, `/relax`, `/balance`
+  - `/snapshot [output_path]` (captures the current camera frame to a file)
   - `/walk <y> [ttl] [speed] [gait_type]`
   - `/rotate <angle> [ttl] [speed]`
   - `/attitude <roll> <pitch> <yaw>`
@@ -58,3 +71,9 @@ python interactive_runner.py --dry-run --llm-provider openai
 
 - `--max-iterations 20` sets max LLM action iterations per goal.
 - `--llm-model <name>` overrides the default model for the selected provider.
+- `--mode local|dry-run|remote` controls execution backend.
+- `--robot-url <url>` sets robot service URL in remote mode.
+
+## Env Vars
+
+- `HEXAPOD_ROBOT_URL` sets default robot URL for remote mode (`http://127.0.0.1:8080` by default).
