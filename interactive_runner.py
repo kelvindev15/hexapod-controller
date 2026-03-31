@@ -144,6 +144,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional model override for the selected LLM provider",
     )
     parser.add_argument(
+        "--system-prompt-file",
+        default=os.environ.get("HEXAPOD_SYSTEM_PROMPT_FILE", None),
+        help="Path to a text file used as LLM system prompt",
+    )
+    parser.add_argument(
         "--max-iterations",
         type=int,
         default=20,
@@ -392,7 +397,12 @@ def main() -> int:
         llm_event_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(llm_event_loop)
         chat = create_chat(args.llm_provider, args.llm_model)
-        llm_controller = LLMRobotController(robotController=robot_bridge, chat=chat, motionExecutor=executor)
+        llm_controller = LLMRobotController(
+            robotController=robot_bridge,
+            chat=chat,
+            motionExecutor=executor,
+            system_prompt_file=args.system_prompt_file,
+        )
         model_name = chat.get_model_name()
         print(f"LLM control enabled: provider={args.llm_provider} model={model_name}")
     except Exception as exc:

@@ -3,8 +3,10 @@ from common.utils.llm import create_message
 from common.utils.misc import extractJSON
 import logging
 import json
+import os
 from jsonschema import validate
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Generic, Optional, TypeVar
 from server.core.motion_schema import Action, ActionType
 
@@ -43,7 +45,7 @@ class SchemaValidationError(Exception):
 
 
 class LLMAdapter:
-    def __init__(self, chat: LLMChat):
+    def __init__(self, chat: LLMChat, system_prompt: str | None = None, system_prompt_file: str | None = None):
         self.chat = chat
         self.responseSchema = {
             "type": "object",
@@ -93,25 +95,66 @@ class LLMAdapter:
             },
             "required": ["goal", "scene_description", "reasoning", "action"],
         }
-        self._install_system_instruction()
+        self._install_system_instruction(system_prompt=system_prompt, system_prompt_file=system_prompt_file)
 
-    def _install_system_instruction(self) -> None:
+    def _default_system_instruction(self) -> str:
+        return (
+            "You are a motion planner for a hexapod robot. "
+            "Always respond with exactly one valid JSON object and no extra text. "
+            "Allowed action.command values: FRONT, BACK, ROTATE_LEFT, ROTATE_RIGHT, STOP, RELAX, BALANCE, COMPLETE. "
+            "Use this JSON shape: "
+            '{"goal":"...","scene_description":"...","reasoning":"...",'
+            '"action":{"command":"FRONT","params":{"value":10}}}. '
+            "For movement, params.value must be numeric. "
+            "When goal is complete, use command COMPLETE."
+        )
+
+    def _try_read_prompt_file(self, file_path: str | None) -> str | None:
+        if not file_path:
+            return None
+
+        candidate = Path(file_path).expanduser()
+        roots = [Path.cwd(), Path(__file__).resolve().parents[3]]
+        resolved_paths = [candidate] if candidate.is_absolute() else [root / candidate for root in roots]
+
+        for path in resolved_paths:
+            try:
+                if path.exists() and path.is_file():
+                    content = path.read_text(encoding="utf-8").strip()
+                    if content:
+                        logger.info("Loaded LLM system prompt from file: %s", path)
+                        return content
+            except Exception:
+                logger.warning("Failed reading system prompt file: %s", path, exc_info=True)
+        return None
+
+    def _resolve_system_instruction(self, system_prompt: str | None, system_prompt_file: str | None) -> str:
+        if system_prompt is not None and system_prompt.strip():
+            return system_prompt.strip()
+
+        env_inline = os.environ.get("HEXAPOD_SYSTEM_PROMPT")
+        if env_inline and env_inline.strip():
+            return env_inline.strip()
+
+        prompt_text = self._try_read_prompt_file(system_prompt_file)
+        if prompt_text:
+            return prompt_text
+
+        env_file = os.environ.get("HEXAPOD_SYSTEM_PROMPT_FILE")
+        prompt_text = self._try_read_prompt_file(env_file)
+        if prompt_text:
+            return prompt_text
+
+        return self._default_system_instruction()
+
+    def _install_system_instruction(self, system_prompt: str | None = None, system_prompt_file: str | None = None) -> None:
         if not hasattr(self.chat, "set_system_instruction"):
             return
         if not callable(getattr(self.chat, "set_system_instruction", None)):
             return
 
         self.chat.set_system_instruction(
-            (
-                "You are a motion planner for a hexapod robot. "
-                "Always respond with exactly one valid JSON object and no extra text. "
-                "Allowed action.command values: FRONT, BACK, ROTATE_LEFT, ROTATE_RIGHT, STOP, RELAX, BALANCE, COMPLETE. "
-                "Use this JSON shape: "
-                '{"goal":"...","scene_description":"...","reasoning":"...",'
-                '"action":{"command":"FRONT","params":{"value":10}}}. '
-                "For movement, params.value must be numeric. "
-                "When goal is complete, use command COMPLETE."
-            )
+            self._resolve_system_instruction(system_prompt=system_prompt, system_prompt_file=system_prompt_file)
         )
 
     def _to_float_or_none(self, value):

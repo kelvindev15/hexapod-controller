@@ -18,11 +18,17 @@ logger = logging.getLogger(__name__)
 
 class LLMRobotController:
 
-    def __init__(self, robotController: RobotController, chat: LLMChat, motionExecutor: "MotionExecutor | None" = None):
+    def __init__(
+        self,
+        robotController: RobotController,
+        chat: LLMChat,
+        motionExecutor: "MotionExecutor | None" = None,
+        system_prompt_file: str | None = None,
+    ):
         bootstrap_logging()
         self.robot = robotController
         self.chat = chat
-        self.llmAdapter = LLMAdapter(chat)
+        self.llmAdapter = LLMAdapter(chat, system_prompt_file=system_prompt_file)
         if motionExecutor is not None:
             self.motionExecutor = motionExecutor
         elif hasattr(robotController, "submit_action"):
