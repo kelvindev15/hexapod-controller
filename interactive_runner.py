@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 import atexit
+import logging
 import os
 import readline
 import shlex
@@ -20,6 +21,109 @@ if PROJECT_ROOT not in sys.path:
 
 from common.utils.logging_config import bootstrap_logging
 from server.core.motion_schema import Action, ActionType, WorldState
+
+
+logger = logging.getLogger(__name__)
+
+
+def load_local_env(env_path: str) -> None:
+    """Load simple KEY=VALUE entries from a local .env file into process env."""
+    if not os.path.exists(env_path):
+        return
+
+    try:
+        with open(env_path, "r", encoding="utf-8") as env_file:
+            for raw_line in env_file:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                if not key:
+                    continue
+                value = value.strip().strip('"').strip("'")
+                os.environ.setdefault(key, value)
+    except Exception as exc:
+        logger.warning("Failed to load .env file at %s: %s", env_path, exc)
+
+
+def maybe_enable_mlflow_autologging() -> bool:
+    enabled = os.getenv("HEXAPOD_ENABLE_MLFLOW_AUTOLOG", "1").strip().lower()
+    if enabled in {"0", "false", "no", "off"}:
+        logger.info("MLflow autologging disabled by HEXAPOD_ENABLE_MLFLOW_AUTOLOG=%s", enabled)
+        return False
+
+    autolog_mode = os.getenv("HEXAPOD_MLFLOW_AUTOLOG_MODE", "langchain").strip().lower()
+    if autolog_mode in {"0", "false", "no", "off", "none", "disabled"}:
+        logger.info("MLflow autologging disabled by HEXAPOD_MLFLOW_AUTOLOG_MODE=%s", autolog_mode)
+        return False
+    if autolog_mode not in {"langchain", "generic"}:
+        logger.warning(
+            "Unknown HEXAPOD_MLFLOW_AUTOLOG_MODE=%s. Falling back to 'langchain'.",
+            autolog_mode,
+        )
+        autolog_mode = "langchain"
+
+    try:
+        import mlflow
+    except ImportError:
+        logger.warning("MLflow not installed; tracing is disabled")
+        return False
+
+    try:
+        tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
+        if tracking_uri:
+            mlflow.set_tracking_uri(tracking_uri)
+            logger.info("MLflow tracking URI set: %s", tracking_uri)
+
+        experiment_name = os.getenv("MLFLOW_TRACKING_EXPERIMENT")
+        if experiment_name:
+            try:
+                mlflow.set_experiment(experiment_name)
+            except Exception as exc:
+                if not tracking_uri:
+                    raise
+
+                # Fallback to local file tracking if configured URI is unavailable or not an MLflow server.
+                fallback_dir = os.path.join(PROJECT_ROOT, "mlruns")
+                os.makedirs(fallback_dir, exist_ok=True)
+                fallback_uri = f"file:{fallback_dir}"
+                logger.warning(
+                    "Failed to use configured MLflow tracking URI (%s): %s. Falling back to %s",
+                    tracking_uri,
+                    exc,
+                    fallback_uri,
+                )
+                mlflow.set_tracking_uri(fallback_uri)
+                mlflow.set_experiment(experiment_name)
+
+            logger.info("MLflow experiment set: %s", experiment_name)
+
+        if autolog_mode == "langchain":
+            langchain_module = getattr(mlflow, "langchain", None)
+            if langchain_module and hasattr(langchain_module, "autolog"):
+                try:
+                    # Newer MLflow versions accept log_traces and ensure LangChain traces are emitted.
+                    langchain_module.autolog(log_traces=True)
+                except TypeError:
+                    # Keep compatibility with older MLflow versions.
+                    langchain_module.autolog()
+                logger.info("MLflow LangChain autologging enabled")
+                return True
+
+            logger.warning(
+                "MLflow LangChain autologging requested but unavailable. "
+                "Set HEXAPOD_MLFLOW_AUTOLOG_MODE=generic to force generic autologging."
+            )
+            return False
+
+        mlflow.autolog()
+        logger.info("MLflow generic autologging enabled")
+        return True
+    except Exception as exc:
+        logger.warning("Failed to enable MLflow autologging: %s", exc)
+
+    return False
 
 
 class DryRunExecutor:
@@ -178,6 +282,20 @@ def build_parser() -> argparse.ArgumentParser:
         default=20,
         help="Max LLM reasoning/action iterations per natural language goal",
     )
+    parser.add_argument(
+        "--chat-history-turns",
+        type=int,
+        default=None,
+        help=(
+            "Number of previous user/assistant turns to keep in chat memory. "
+            "Default: keep full history. Set 0 to keep only the current turn."
+        ),
+    )
+    parser.add_argument(
+        "--mlflow-user-id",
+        default=os.environ.get("HEXAPOD_MLFLOW_USER_ID", os.environ.get("USER", "unknown-user")),
+        help="User ID attached to MLflow traces as mlflow.trace.user",
+    )
     return parser
 
 
@@ -325,14 +443,14 @@ def make_action(tokens: list[str]) -> Action:
     raise ValueError(f"Unknown command: {tokens[0]}")
 
 
-def create_chat(provider: str, model_name: str | None):
+def create_chat(provider: str, model_name: str | None, chat_history_turns: int | None):
     from common.llm.chats import GeminiChat, OllamaChat, OpenAIChat
 
     if provider == "openai":
-        return OpenAIChat(model_name=model_name or "gpt-4o-mini")
+        return OpenAIChat(model_name=model_name or "gpt-4o-mini", max_history_turns=chat_history_turns)
     if provider == "gemini":
-        return GeminiChat(model_name=model_name or "gemini-2.0-flash")
-    return OllamaChat(model_name=model_name or "llava")
+        return GeminiChat(model_name=model_name or "gemini-2.0-flash", max_history_turns=chat_history_turns)
+    return OllamaChat(model_name=model_name or "llava", max_history_turns=chat_history_turns)
 
 
 def setup_cli_history() -> None:
@@ -381,9 +499,20 @@ def run_llm_goal(
 
 
 def main() -> int:
+    load_local_env(os.path.join(PROJECT_ROOT, ".env"))
     bootstrap_logging()
+    mlflow_enabled = maybe_enable_mlflow_autologging()
     setup_cli_history()
     args = build_parser().parse_args()
+
+    if args.chat_history_turns is not None and args.chat_history_turns < 0:
+        print("--chat-history-turns must be >= 0")
+        return 1
+
+    if mlflow_enabled:
+        print("MLflow tracing: enabled")
+    else:
+        print("MLflow tracing: disabled (check logs and MLFLOW_* settings)")
 
     mode = "dry-run" if args.dry_run else args.mode
 
@@ -420,7 +549,9 @@ def main() -> int:
 
         llm_event_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(llm_event_loop)
-        chat = create_chat(args.llm_provider, args.llm_model)
+        chat = create_chat(args.llm_provider, args.llm_model, args.chat_history_turns)
+        if hasattr(chat, "set_user_id") and callable(getattr(chat, "set_user_id", None)):
+            chat.set_user_id(args.mlflow_user_id)
         llm_controller = LLMRobotController(
             robotController=robot_bridge,
             chat=chat,
@@ -433,7 +564,7 @@ def main() -> int:
         llm_init_error = f"{type(exc).__name__}: {exc}"
         print(f"LLM initialization failed ({llm_init_error}).")
         if args.llm_provider == "gemini":
-            print("Gemini setup: set GEMINI_API_KEY (or GOOGLE_API_KEY) and install langchain-google-genai.")
+            print("Gemini setup: set GEMINI_API_KEY (or GOOGLE_API_KEY) and install or upgrade langchain-google-genai and google-genai.")
         elif args.llm_provider == "openai":
             print("OpenAI setup: set OPENAI_API_KEY and install langchain-openai.")
         elif args.llm_provider == "ollama":

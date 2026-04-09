@@ -216,3 +216,5 @@ pyrightconfig.json
 
 snapshots/
 yolov8n.pt
+mlruns
+

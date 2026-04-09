@@ -91,6 +91,15 @@ class SlowChat(FakeChat):
         return '{"goal": "done", "scene_description": "done", "reasoning": "goal reached", "action": {"command": "COMPLETE"}}'
 
 
+class ResourceExhausted(Exception):
+    pass
+
+
+class ResourceExhaustedChat(FakeChat):
+    async def send_message(self, _message):
+        raise ResourceExhausted("429 Resource exhausted. Please try again later.")
+
+
 class FakeRobot:
     def goFront(self, distance=1.0):
         return None
@@ -215,10 +224,21 @@ class LLMExecutionFlowTests(unittest.IsolatedAsyncioTestCase):
         robot.getDistanceSensorProfile = lambda: {"type": "ultrasonic", "channels": 1, "sections": 1}
         controller = LLMRobotController(robotController=robot, chat=chat, motionExecutor=FakeMotionExecutor())
 
-        controller._LLMRobotController__buildSceneDescription("test")
+        scene = controller._LLMRobotController__buildSceneDescription("test")
 
         self.assertTrue(_distance_call_args)
         self.assertEqual(_distance_call_args[-1]["sections"], 1)
+        self.assertIn("This is the new scene.", scene)
+
+    async def test_scene_description_fallback_without_lidar_keeps_new_scene_preamble(self):
+        chat = FakeChat(["{}"])
+        robot = FakeRobot()
+        robot.getFrontLidarImage = None
+        controller = LLMRobotController(robotController=robot, chat=chat, motionExecutor=FakeMotionExecutor())
+
+        scene = controller._LLMRobotController__buildSceneDescription("test")
+
+        self.assertEqual(scene, "This is the new scene. Goal: test")
 
     async def test_malformed_llm_response_returns_failure(self):
         chat = FakeChat(["this is not json"])
@@ -230,6 +250,17 @@ class LLMExecutionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.ok)
         self.assertIsInstance(result.error, InvalidJSON)
         self.assertTrue(any("Failed to extract/parse JSON" in entry for entry in cm.output))
+
+    async def test_provider_throttle_error_returns_failure_result(self):
+        chat = ResourceExhaustedChat([])
+        adapter = LLMAdapter(chat)
+
+        with self.assertLogs("common.robot.llm.LLMAdapter", level="WARNING") as cm:
+            result = await adapter.iterate("goal", "image")
+
+        self.assertFalse(result.ok)
+        self.assertIsInstance(result.error, ResourceExhausted)
+        self.assertTrue(any("LLM request failed before response parsing" in entry for entry in cm.output))
 
     async def test_unsafe_action_rejection(self):
         executor = FakeMotionExecutor()
@@ -294,6 +325,19 @@ class LLMExecutionFlowTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(ask_task, timeout=1.0)
         self.assertFalse(controller.sessionLock.locked())
         self.assertEqual(len(executor.submitted), 0)
+
+    async def test_controller_ends_gracefully_when_provider_is_throttled(self):
+        chat = ResourceExhaustedChat([])
+        robot = FakeRobot()
+        executor = FakeMotionExecutor()
+        controller = LLMRobotController(robotController=robot, chat=chat, motionExecutor=executor)
+
+        with self.assertLogs("common.robot.LLMRobotController", level="WARNING") as cm:
+            await controller.ask("move", maxIterations=3)
+
+        self.assertFalse(controller.sessionLock.locked())
+        self.assertEqual(len(executor.submitted), 0)
+        self.assertTrue(any("LLM provider throttled" in entry for entry in cm.output))
 
 
 if __name__ == "__main__":

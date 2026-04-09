@@ -72,6 +72,7 @@ python interactive_runner.py --dry-run --llm-provider openai
 ### Useful Flags
 
 - `--max-iterations 20` sets max LLM action iterations per goal.
+- `--chat-history-turns <n>` controls how many previous chat turns are retained (`default: full history`, `0: current turn only`).
 - `--llm-model <name>` overrides the default model for the selected provider.
 - `--mode local|dry-run|remote` controls execution backend.
 - `--robot-url <url>` sets robot service URL in remote mode.
@@ -79,6 +80,10 @@ python interactive_runner.py --dry-run --llm-provider openai
 ### Env Vars
 
 - `HEXAPOD_ROBOT_URL` sets default robot URL for remote mode (`http://127.0.0.1:8080` by default).
+- `HEXAPOD_ENABLE_MLFLOW_AUTOLOG` toggles MLflow autologging globally (`1` by default, set `0` to disable).
+- `HEXAPOD_MLFLOW_AUTOLOG_MODE` controls MLflow mode: `langchain` (default, safer for async LLM loops) or `generic` (broader patching, may be noisy in some async contexts).
+- `HEXAPOD_MLFLOW_USER_ID` sets the logical user ID attached to trace metadata (`mlflow.trace.user`).
+- Each LLM session is tagged with `mlflow.trace.session` using the controller-generated chat/session UUID.
 
 ## Robot/Host Architecture Split
 

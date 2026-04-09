@@ -341,7 +341,11 @@ class LLMAdapter:
         Success: Result.success(Action)
         Failure: Result.failure(Exception) with one of: InvalidJSON, SchemaValidationError, or other runtime error
         """
-        response = await self.chat.send_message(create_message(prompt, image))
+        try:
+            response = await self.chat.send_message(create_message(prompt, image))
+        except Exception as e:
+            logger.warning("LLM request failed before response parsing: %s", type(e).__name__)
+            return Result.failure(e)
 
         # Attempt to extract JSON string from the model response
         try:

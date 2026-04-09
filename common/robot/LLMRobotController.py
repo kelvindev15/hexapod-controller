@@ -83,8 +83,24 @@ class LLMRobotController:
 
         return max(1, min(8, reading_count))
 
+    def _is_provider_throttle_error(self, error: Exception | None) -> bool:
+        if error is None:
+            return False
+        name = type(error).__name__.lower()
+        message = str(error).lower()
+        return (
+            "llmratelimiterror" in name
+            or "resourceexhausted" in name
+            or "ratelimit" in name
+            or "resource exhausted" in message
+            or "rate limit" in message
+            or "429" in message
+        )
+
     def __buildSceneDescription(self, prompt = None) -> str:
-        preamble = f"Goal: {prompt}" if prompt is not None else "Here is the current view of the robot."
+        preamble = "This is the new scene."
+        if prompt is not None:
+            preamble = f"{preamble} Goal: {prompt}"
         if hasattr(self.robot, "getFrontLidarImage") and callable(getattr(self.robot, "getFrontLidarImage", None)):
             readings = self.robot.getFrontLidarImage()
             sensor_profile = self._read_distance_sensor_profile()
@@ -95,7 +111,7 @@ class LLMRobotController:
                 {getDistanceDescription(getDistancesFromLidar(readings, 90, section_count), sensor_label=sensor_label)}
                 """.strip()
             return view_description
-        return "Current view:"
+        return preamble
 
     async def __getCameraImageBase64(self) -> str:
         # Let motion settle briefly to reduce blur in LLM-bound camera frames.
@@ -179,6 +195,13 @@ class LLMRobotController:
                         scene, image = await self.__gather_scene_and_image(f"{prompt}\n{message}")
                         response = await self.llmAdapter.iterate(scene, image)
                 elif not response.ok:
+                    if self._is_provider_throttle_error(response.error):
+                        logger.warning(
+                            "LLM provider throttled chat_id=%s error=%s; ending session gracefully",
+                            chat_id,
+                            type(response.error).__name__,
+                        )
+                        break
                     logger.warning("LLM response invalid chat_id=%s error=%s", chat_id, type(response.error).__name__)
                     message = (
                         "The response format is invalid. Please respond again following the schema.\n"
