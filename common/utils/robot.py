@@ -110,21 +110,26 @@ def format_distance_reading(value: Optional[float], precision: int = 2) -> str:
     return f"{round(value, precision)}" if value is not None else "N/A"
 
 
-def getDistanceDescription(distances: Dict[str, Any]) -> str:
-    """Generate a human-readable description of LIDAR distances for an arbitrary number of sections."""
+def getDistanceDescription(distances: Dict[str, Any], sensor_label: str = "Distance sensor") -> str:
+    """Generate a human-readable description of distance readings for an arbitrary number of sections."""
     lines = []
-    lines.append(f"Lidar distances:")
+    label = sensor_label.strip() if isinstance(sensor_label, str) and sensor_label.strip() else "Distance sensor"
+    lines.append(f"{label} distances:")
     lines.append(f"  - Front: {format_distance_reading(distances.get('front_distance'))}")
 
     sections = distances.get("sections", [])
+    include_angle_details = len(sections) > 1
     for idx, sec in enumerate(sections):
         min_a = sec.get("minAngle")
         max_a = sec.get("maxAngle")
         dist = sec.get("min_distance")
         angle = sec.get("min_distance_angle")
         angle_str = f"{np.round(angle)}" if angle is not None else "N/A"
-        lines.append(
-            f"  - Section {idx+1} ([{min_a}, {max_a}] degrees): {format_distance_reading(dist)} at angle {angle_str} degrees"
-        )
+        if include_angle_details:
+            lines.append(
+                f"  - Section {idx+1} ([{min_a}, {max_a}] degrees): {format_distance_reading(dist)} at angle {angle_str} degrees"
+            )
+        else:
+            lines.append(f"  - Reading {idx+1}: {format_distance_reading(dist)}")
 
     return "\n".join(lines)

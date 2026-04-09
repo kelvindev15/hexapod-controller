@@ -41,6 +41,7 @@ class Camera:
         self.stream_config = self.camera.create_video_configuration(main={"size": stream_size}, transform=self.transform)  # Create the video configuration
         self.streaming_output = StreamingOutput()  # Initialize the streaming output object
         self.streaming = False  # Initialize the streaming flag
+        self.keep_warm_for_stills = True
 
     def start_image(self) -> None:
         """Start the camera preview and capture."""
@@ -65,7 +66,7 @@ class Camera:
             
             image = self.camera.capture_array()  # Capture image as numpy array
             
-            if not was_started:
+            if not was_started and not self.keep_warm_for_stills:
                 self.camera.stop()  # Stop the camera if we started it
             
             return image

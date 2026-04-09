@@ -33,3 +33,6 @@ class RobotController(ABC):
     @abstractmethod
     def getFrontLidarImage(self) -> List[float]:
         pass
+
+    def getDistanceSensorProfile(self) -> dict | None:
+        return None

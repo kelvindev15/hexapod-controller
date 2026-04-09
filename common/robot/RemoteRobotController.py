@@ -111,3 +111,11 @@ class RemoteRobotController(RobotController):
 
     def getFrontLidarImage(self):
         return self.getLidarImage(90, 0)
+
+    def getDistanceSensorProfile(self) -> dict | None:
+        return {
+            "type": "ultrasonic",
+            "channels": 1,
+            "sections": 1,
+            "label": "Ultrasonic",
+        }

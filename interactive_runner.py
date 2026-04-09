@@ -48,6 +48,8 @@ class DryRunExecutor:
 class InteractiveRobotBridge:
     def __init__(self, executor):
         self.executor = executor
+        self._camera = None
+        self._camera_init_failed = False
 
     def goFront(self, distance: float = 1.0) -> None:
         self.executor.submit_action(
@@ -90,16 +92,30 @@ class InteractiveRobotBridge:
 
     def getCameraImage(self):
         try:
-            from server.drivers.camera import Camera
-            camera = Camera()
+            if self._camera is None and not self._camera_init_failed:
+                from server.drivers.camera import Camera
+
+                self._camera = Camera()
+            camera = self._camera
+            if camera is None:
+                return np.zeros((64, 64, 3), dtype=np.uint8)
             image = camera.capture_array()
-            camera.close()
             if image is not None:
                 return image
             return np.zeros((64, 64, 3), dtype=np.uint8)
         except Exception as exc:
+            self._camera_init_failed = True
             # Fallback to black image if camera is not available
             return np.zeros((64, 64, 3), dtype=np.uint8)
+
+    def close(self) -> None:
+        if self._camera is not None:
+            try:
+                self._camera.close()
+            except Exception:
+                pass
+            finally:
+                self._camera = None
 
     def getLidarImage(self, fov_degrees: int, offset_degrees: int = 0):
         _ = offset_degrees
@@ -110,6 +126,14 @@ class InteractiveRobotBridge:
 
     def getFrontLidarImage(self):
         return self.getLidarImage(90, 0)
+
+    def getDistanceSensorProfile(self) -> dict | None:
+        return {
+            "type": "ultrasonic",
+            "channels": 1,
+            "sections": 1,
+            "label": "Ultrasonic",
+        }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -485,6 +509,8 @@ def main() -> int:
             pass
         if hasattr(executor, "stop") and callable(getattr(executor, "stop", None)):
             executor.stop()
+        if hasattr(robot_bridge, "close") and callable(getattr(robot_bridge, "close", None)):
+            robot_bridge.close()
 
     return 0
 

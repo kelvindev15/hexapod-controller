@@ -68,6 +68,8 @@ class LLMAdapter:
                                         "turn": {"type": "number"},
                                         "angle": {"type": "number"},
                                         "distance": {"type": "number"},
+                                        "speed": {"type": "number"},
+                                        "ttl": {"type": "number"},
                                     },
                                     "additionalProperties": True,
                                 }
@@ -84,6 +86,8 @@ class LLMAdapter:
                                         "turn": {"type": "number"},
                                         "angle": {"type": "number"},
                                         "distance": {"type": "number"},
+                                        "speed": {"type": "number"},
+                                        "ttl": {"type": "number"},
                                     },
                                     "additionalProperties": True,
                                 }
@@ -104,8 +108,8 @@ class LLMAdapter:
             "Allowed action.command values: FRONT, BACK, ROTATE_LEFT, ROTATE_RIGHT, STOP, RELAX, BALANCE, COMPLETE. "
             "Use this JSON shape: "
             '{"goal":"...","scene_description":"...","reasoning":"...",'
-            '"action":{"command":"FRONT","params":{"value":10}}}. '
-            "For movement, params.value must be numeric. "
+            '"action":{"command":"FRONT","params":{"value":10,"speed":5,"ttl":1.0}}}. '
+            "For movement, params.value must be numeric. params.speed and params.ttl are optional numeric controls. "
             "When goal is complete, use command COMPLETE."
         )
 
@@ -223,6 +227,18 @@ class LLMAdapter:
 
         return 0.0
 
+    def _extract_optional_number(self, raw_params, keys: list[str]) -> float | None:
+        if not isinstance(raw_params, dict):
+            return None
+
+        for key in keys:
+            if key in raw_params:
+                candidate = self._to_float_or_none(raw_params.get(key))
+                if candidate is not None:
+                    return candidate
+
+        return None
+
     def _canonicalize_response(self, action_obj: dict) -> dict:
         if not isinstance(action_obj, dict):
             raise ValueError("LLM response must be a JSON object")
@@ -241,6 +257,14 @@ class LLMAdapter:
         value = self._extract_value(command, raw_params)
         if command in {"BACK", "ROTATE_LEFT"}:
             value = abs(value)
+        speed = self._extract_optional_number(raw_params, ["speed"])
+        ttl = self._extract_optional_number(raw_params, ["ttl", "duration", "seconds", "time"])
+
+        canonical_params = {"value": value}
+        if speed is not None:
+            canonical_params["speed"] = speed
+        if ttl is not None:
+            canonical_params["ttl"] = ttl
 
         canonical = dict(action_obj)
         canonical.setdefault("goal", "")
@@ -249,7 +273,7 @@ class LLMAdapter:
         canonical["action"] = {
             **action_raw,
             "command": command,
-            "params": {"value": value},
+            "params": canonical_params,
         }
         return canonical
 
@@ -259,34 +283,44 @@ class LLMAdapter:
     def _normalize_action(self, command: str, raw_params, metadata: dict) -> Action:
         params = raw_params if isinstance(raw_params, dict) else {"value": float(raw_params)}
         value = float(params.get("value", 0.0))
-        ttl = max(0.25, min(4.0, abs(value) / 15.0))
+        requested_ttl = self._to_float_or_none(params.get("ttl"))
+        ttl = max(0.25, min(4.0, requested_ttl if requested_ttl is not None else abs(value) / 15.0))
+
+        requested_speed = self._to_float_or_none(params.get("speed"))
+        speed_default = 5
+        if str(command).upper() in {"ROTATE_LEFT", "ROTATE_RIGHT"}:
+            speed_default = 4
+        speed = speed_default
+        if requested_speed is not None:
+            speed = int(round(max(1.0, min(10.0, requested_speed))))
+
         upper_command = command.upper()
 
         if upper_command == "FRONT":
             return Action(
                 type=ActionType.WALK,
-                params={"x": 0, "y": abs(value), "angle": 0, "gait_type": "1", "speed": 5},
+                params={"x": 0, "y": abs(value), "angle": 0, "gait_type": "1", "speed": speed},
                 ttl=ttl,
                 metadata={**metadata, "command": upper_command},
             )
         if upper_command == "BACK":
             return Action(
                 type=ActionType.WALK,
-                params={"x": 0, "y": -abs(value), "angle": 0, "gait_type": "1", "speed": 5},
+                params={"x": 0, "y": -abs(value), "angle": 0, "gait_type": "1", "speed": speed},
                 ttl=ttl,
                 metadata={**metadata, "command": upper_command},
             )
         if upper_command == "ROTATE_LEFT":
             return Action(
                 type=ActionType.WALK,
-                params={"x": 0, "y": 0, "angle": -abs(value), "gait_type": "1", "speed": 4},
+                params={"x": 0, "y": 0, "angle": -abs(value), "gait_type": "1", "speed": speed},
                 ttl=ttl,
                 metadata={**metadata, "command": upper_command},
             )
         if upper_command == "ROTATE_RIGHT":
             return Action(
                 type=ActionType.WALK,
-                params={"x": 0, "y": 0, "angle": abs(value), "gait_type": "1", "speed": 4},
+                params={"x": 0, "y": 0, "angle": abs(value), "gait_type": "1", "speed": speed},
                 ttl=ttl,
                 metadata={**metadata, "command": upper_command},
             )

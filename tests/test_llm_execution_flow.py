@@ -13,8 +13,16 @@ fake_images.toBase64Image = lambda image: "stub-image"
 sys.modules.setdefault("common.utils.images", fake_images)
 
 fake_robot_utils = types.ModuleType("common.utils.robot")
-fake_robot_utils.getDistancesFromLidar = lambda _readings, _fov, _sections: {"front_distance": 100.0, "sections": []}
-fake_robot_utils.getDistanceDescription = lambda _distances: "Lidar distances: clear"
+_distance_call_args = []
+
+
+def _stub_get_distances_from_lidar(_readings, _fov, _sections):
+    _distance_call_args.append({"sections": _sections})
+    return {"front_distance": 100.0, "sections": []}
+
+
+fake_robot_utils.getDistancesFromLidar = _stub_get_distances_from_lidar
+fake_robot_utils.getDistanceDescription = lambda _distances, sensor_label="Distance sensor": f"{sensor_label} distances: clear"
 sys.modules.setdefault("common.utils.robot", fake_robot_utils)
 
 fake_chats = types.ModuleType("common.llm.chats")
@@ -108,6 +116,9 @@ class FakeRobot:
     def getFrontLidarImage(self):
         return [100.0] * 30
 
+    def getDistanceSensorProfile(self):
+        return None
+
 
 class FakeMotionExecutor:
     def __init__(self):
@@ -153,6 +164,32 @@ class LLMExecutionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.value.metadata["command"], "FRONT")
         self.assertEqual(result.value.params["y"], 8.0)
 
+    async def test_action_uses_llm_selected_speed_and_ttl(self):
+        chat = FakeChat([
+            '{"goal": "move", "scene_description": "clear", "reasoning": "safe", "action": {"command": "FRONT", "params": {"value": 12, "speed": 7, "ttl": 2.5}}}'
+        ])
+        adapter = LLMAdapter(chat)
+
+        result = await adapter.iterate("goal", "image")
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.value.type, ActionType.WALK)
+        self.assertEqual(result.value.params["speed"], 7)
+        self.assertEqual(result.value.ttl, 2.5)
+
+    async def test_action_clamps_llm_selected_speed_and_ttl(self):
+        chat = FakeChat([
+            '{"goal": "move", "scene_description": "clear", "reasoning": "safe", "action": {"command": "ROTATE_RIGHT", "params": {"value": 20, "speed": 99, "ttl": 99}}}'
+        ])
+        adapter = LLMAdapter(chat)
+
+        result = await adapter.iterate("goal", "image")
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.value.type, ActionType.WALK)
+        self.assertEqual(result.value.params["speed"], 10)
+        self.assertEqual(result.value.ttl, 4.0)
+
     async def test_complete_without_parameters_is_accepted(self):
         chat = FakeChat([
             '{"goal": "done", "scene_description": "done", "reasoning": "goal reached", "action": {"command": "COMPLETE"}}'
@@ -170,6 +207,18 @@ class LLMExecutionFlowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(chat.system_instruction)
         self.assertIn("valid JSON object", chat.system_instruction)
+
+    async def test_scene_description_uses_sensor_profile_section_count(self):
+        _distance_call_args.clear()
+        chat = FakeChat(["{}"])
+        robot = FakeRobot()
+        robot.getDistanceSensorProfile = lambda: {"type": "ultrasonic", "channels": 1, "sections": 1}
+        controller = LLMRobotController(robotController=robot, chat=chat, motionExecutor=FakeMotionExecutor())
+
+        controller._LLMRobotController__buildSceneDescription("test")
+
+        self.assertTrue(_distance_call_args)
+        self.assertEqual(_distance_call_args[-1]["sections"], 1)
 
     async def test_malformed_llm_response_returns_failure(self):
         chat = FakeChat(["this is not json"])

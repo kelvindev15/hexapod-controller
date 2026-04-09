@@ -2,7 +2,6 @@ from abc import ABC
 import asyncio
 import threading
 import logging
-from langchain_core.rate_limiters import InMemoryRateLimiter
 from langchain_core.messages.base import BaseMessage
 
 try:
@@ -20,12 +19,6 @@ from common.utils.llm import create_sys_message, geminiAPIKey, getOpenAIKey
 
 
 logger = logging.getLogger(__name__)
-
-rate_limiter = InMemoryRateLimiter(
-    requests_per_second=0.075,  # 6 seconds per request
-    max_bucket_size=2,
-    check_every_n_seconds=1
-)
 
 
 def traceable():
@@ -129,7 +122,7 @@ class LLMChat(ABC):
             raise Exception("LLM not initialized")
 
 class GeminiChat(LLMChat):
-    def __init__(self, model_name="gemini-2.0-flash"):
+    def __init__(self, model_name="gemini-robotics-er-1.5-preview"):
         super().__init__()
         from langchain_google_genai import ChatGoogleGenerativeAI
 
@@ -141,7 +134,6 @@ class GeminiChat(LLMChat):
             timeout=None,
             max_retries=5,
             api_key=geminiAPIKey(),
-            rate_limiter=rate_limiter
         )
 
 class OllamaChat(LLMChat):
