@@ -1,6 +1,8 @@
 import asyncio
 import uuid
 import logging
+from dataclasses import asdict, is_dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 from common.utils.logging_config import bootstrap_logging
 from common.llm.chats import LLMChat
@@ -9,6 +11,7 @@ from common.utils.robot import getDistancesFromLidar, getDistanceDescription
 from common.robot.RobotController import RobotController
 from common.robot.llm.ActionAdapter import ActionAdapter, ActionStatus
 from common.robot.llm.LLMAdapter import LLMAdapter
+from common.utils.experiment_reporter import ExperimentReporter
 from server.core.motion_schema import ActionType
 
 if TYPE_CHECKING:
@@ -25,6 +28,7 @@ class LLMRobotController:
         chat: LLMChat,
         motionExecutor: "MotionExecutor | None" = None,
         system_prompt_file: str | None = None,
+        reporter: ExperimentReporter | None = None,
     ):
         bootstrap_logging()
         self.robot = robotController
@@ -45,6 +49,8 @@ class LLMRobotController:
         self.sessionLock = asyncio.Lock()
         self._interrupt_requested = False
         self._session_task: asyncio.Task | None = None
+        self.reporter = reporter
+        self.last_session_outcome: dict[str, Any] | None = None
 
     def interrupt(self) -> bool:
         was_running = self.sessionLock.locked()
@@ -97,6 +103,38 @@ class LLMRobotController:
             or "429" in message
         )
 
+    def _safe_world_state(self) -> dict[str, Any] | None:
+        state_getter = getattr(self.motionExecutor, "get_state", None)
+        if not callable(state_getter):
+            return None
+        try:
+            state = state_getter()
+            return self._to_serializable(state)
+        except Exception:
+            logger.debug("Failed to read world state", exc_info=True)
+            return None
+
+    def _to_serializable(self, value: Any) -> Any:
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, Enum):
+            return value.value
+        if is_dataclass(value):
+            return self._to_serializable(asdict(value))
+        if isinstance(value, dict):
+            return {str(key): self._to_serializable(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._to_serializable(item) for item in value]
+        return str(value)
+
+    def _report_event(self, event_type: str, **payload: Any) -> None:
+        if self.reporter is None:
+            return
+        try:
+            self.reporter.log_event(event_type, **payload)
+        except Exception:
+            logger.warning("Experiment reporter failed for event_type=%s", event_type, exc_info=True)
+
     def __buildSceneDescription(self, prompt = None) -> str:
         preamble = "This is the new scene."
         if prompt is not None:
@@ -132,7 +170,7 @@ class LLMRobotController:
         )
         return scene, image
         
-    async def ask(self, prompt: str, maxIterations: int = 30):
+    async def ask(self, prompt: str, maxIterations: int = 30, reporter: ExperimentReporter | None = None):
         if self.sessionLock.locked():
             logger.warning("LLMRobotController: Unable to acquire action lock, another session is in progress.")
             return
@@ -141,12 +179,25 @@ class LLMRobotController:
         self._interrupt_requested = False
         self._session_task = asyncio.current_task()
         chat_id = str(uuid.uuid4())
+        session_reporter = reporter if reporter is not None else self.reporter
         self.llmAdapter.clear()
         self.chat.set_chat_id(chat_id)
         logger.info("LLM session started chat_id=%s max_iterations=%d", chat_id, maxIterations)
         iterations = 0
+        termination_reason = "unknown"
+
+        if session_reporter is not None:
+            self.reporter = session_reporter
+        self._report_event(
+            "session_start",
+            goal_text=prompt,
+            chat_id=chat_id,
+            session_id=chat_id,
+            iteration_index=0,
+        )
         try:
             if self._interrupt_requested:
+                termination_reason = "interrupted_before_start"
                 return
             scene, image = await self.__gather_scene_and_image(prompt)
             response = await self.llmAdapter.iterate(scene, image)
@@ -157,7 +208,24 @@ class LLMRobotController:
             ):
                 iterations += 1
                 logger.info("LLM iteration chat_id=%s iteration=%d/%d", chat_id, iterations, maxIterations)
+                self._report_event(
+                    "llm_iteration",
+                    goal_text=prompt,
+                    chat_id=chat_id,
+                    session_id=chat_id,
+                    iteration_index=iterations,
+                )
                 if response.ok:
+                    world_state_before = self._safe_world_state()
+                    self._report_event(
+                        "action_proposed",
+                        goal_text=prompt,
+                        chat_id=chat_id,
+                        session_id=chat_id,
+                        iteration_index=iterations,
+                        action_proposed=self._to_serializable(response.value),
+                        world_state_before=world_state_before,
+                    )
                     decision = self.actionAdapter.assess_safety(response.value, await self.__getLidarImage(30, 0))
                     if decision.is_safe:
                         try:
@@ -165,19 +233,62 @@ class LLMRobotController:
                             await asyncio.wait_for(actionTask, 30)
                         except asyncio.CancelledError:
                             logger.info("LLM action execution interrupted chat_id=%s", chat_id)
+                            termination_reason = "interrupted_during_execution"
+                            self._report_event(
+                                "session_interrupted",
+                                goal_text=prompt,
+                                chat_id=chat_id,
+                                session_id=chat_id,
+                                iteration_index=iterations,
+                            )
                             break
                         except asyncio.TimeoutError:
                             logger.warning("Action execution timed out")
+                            termination_reason = "action_timeout"
+                            self._report_event(
+                                "action_executed",
+                                goal_text=prompt,
+                                chat_id=chat_id,
+                                session_id=chat_id,
+                                iteration_index=iterations,
+                                action_executed=self._to_serializable(response.value),
+                                execution_status="timeout",
+                                world_state_before=world_state_before,
+                                world_state_after=self._safe_world_state(),
+                            )
                             break
 
                         actionResult = await actionTask
+                        self._report_event(
+                            "action_executed",
+                            goal_text=prompt,
+                            chat_id=chat_id,
+                            session_id=chat_id,
+                            iteration_index=iterations,
+                            action_executed=self._to_serializable(response.value),
+                            execution_status=(
+                                "success" if actionResult.status == ActionStatus.SUCCESS else "failure"
+                            ),
+                            error_message=actionResult.message if actionResult.status != ActionStatus.SUCCESS else None,
+                            world_state_before=world_state_before,
+                            world_state_after=self._safe_world_state(),
+                        )
                         if self._interrupt_requested:
+                            termination_reason = "interrupted"
+                            self._report_event(
+                                "session_interrupted",
+                                goal_text=prompt,
+                                chat_id=chat_id,
+                                session_id=chat_id,
+                                iteration_index=iterations,
+                            )
                             break
                         if actionResult.status == ActionStatus.SUCCESS:
                             scene, image = await self.__gather_scene_and_image(prompt)
                             response = await self.llmAdapter.iterate(scene, image)
                         else:
                             logger.warning("Action execution failed chat_id=%s reason=%s", chat_id, actionResult.message)
+                            termination_reason = "action_execution_failed"
                             break
                     else:
                         logger.warning(
@@ -186,6 +297,17 @@ class LLMRobotController:
                             response.value.type.value,
                             decision.reason,
                             response.value.params,
+                        )
+                        self._report_event(
+                            "action_rejected",
+                            goal_text=prompt,
+                            chat_id=chat_id,
+                            session_id=chat_id,
+                            iteration_index=iterations,
+                            action_proposed=self._to_serializable(response.value),
+                            safety_decision="rejected",
+                            safety_reason=decision.reason,
+                            world_state_before=world_state_before,
                         )
                         message = (
                             f"The action {response.value.type.value} with params {response.value.params} "
@@ -201,8 +323,27 @@ class LLMRobotController:
                             chat_id,
                             type(response.error).__name__,
                         )
+                        termination_reason = "provider_throttle"
+                        self._report_event(
+                            "provider_throttle",
+                            goal_text=prompt,
+                            chat_id=chat_id,
+                            session_id=chat_id,
+                            iteration_index=iterations,
+                            error_type=type(response.error).__name__,
+                            error_message=str(response.error),
+                        )
                         break
                     logger.warning("LLM response invalid chat_id=%s error=%s", chat_id, type(response.error).__name__)
+                    self._report_event(
+                        "llm_invalid_response",
+                        goal_text=prompt,
+                        chat_id=chat_id,
+                        session_id=chat_id,
+                        iteration_index=iterations,
+                        error_type=type(response.error).__name__,
+                        error_message=str(response.error),
+                    )
                     message = (
                         "The response format is invalid. Please respond again following the schema.\n"
                         f"Expected Schema: {self.llmAdapter.responseSchema}\n"
@@ -210,17 +351,64 @@ class LLMRobotController:
                     )
                     scene, image = await self.__gather_scene_and_image(f"{prompt}\n{message}")
                     response = await self.llmAdapter.iterate(scene, image)
+            if termination_reason == "unknown":
+                if self._interrupt_requested:
+                    termination_reason = "interrupted"
+                elif response.ok and response.value.type == ActionType.COMPLETE:
+                    termination_reason = "goal_complete"
+                elif iterations >= maxIterations:
+                    termination_reason = "max_iterations"
+                else:
+                    termination_reason = "ended"
             if self._interrupt_requested:
                 logger.info("LLM session interrupted chat_id=%s", chat_id)
+                self._report_event(
+                    "session_interrupted",
+                    goal_text=prompt,
+                    chat_id=chat_id,
+                    session_id=chat_id,
+                    iteration_index=iterations,
+                )
         except asyncio.CancelledError:
             self._interrupt_requested = True
+            termination_reason = "cancelled"
             logger.info("LLM session cancelled chat_id=%s", chat_id)
+            self._report_event(
+                "session_interrupted",
+                goal_text=prompt,
+                chat_id=chat_id,
+                session_id=chat_id,
+                iteration_index=iterations,
+            )
         except Exception:
+            termination_reason = "error"
             logger.exception("Error in LLMRobotController.ask chat_id=%s", chat_id)
+            self._report_event(
+                "session_error",
+                goal_text=prompt,
+                chat_id=chat_id,
+                session_id=chat_id,
+                iteration_index=iterations,
+            )
         finally:
             self._session_task = None
             # always release the lock
             if self.sessionLock.locked():
                 self.sessionLock.release()
             logger.info("LLM session ended chat_id=%s iterations=%d", chat_id, iterations)
+            self.last_session_outcome = {
+                "chat_id": chat_id,
+                "iterations": iterations,
+                "termination_reason": termination_reason,
+                "success": termination_reason == "goal_complete",
+            }
+            self._report_event(
+                "session_end",
+                goal_text=prompt,
+                chat_id=chat_id,
+                session_id=chat_id,
+                iteration_index=iterations,
+                termination_reason=termination_reason,
+                success=termination_reason == "goal_complete",
+            )
     

@@ -20,6 +20,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from common.utils.logging_config import bootstrap_logging
+from common.utils.experiment_reporter import ExperimentReporter
 from server.core.motion_schema import Action, ActionType, WorldState
 
 
@@ -296,6 +297,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("HEXAPOD_MLFLOW_USER_ID", os.environ.get("USER", "unknown-user")),
         help="User ID attached to MLflow traces as mlflow.trace.user",
     )
+    parser.add_argument(
+        "--experiments-dir",
+        default="experiments",
+        help="Directory where per-goal experiment reports are stored",
+    )
+    parser.add_argument(
+        "--disable-experiment-reporting",
+        action="store_true",
+        help="Disable writing per-goal experiment reports",
+    )
     return parser
 
 
@@ -477,13 +488,25 @@ def run_llm_goal(
     llm_controller,
     goal: str,
     max_iterations: int,
+    reporter: ExperimentReporter | None = None,
 ) -> bool:
-    task = llm_event_loop.create_task(llm_controller.ask(goal, maxIterations=max_iterations))
+    task = llm_event_loop.create_task(
+        llm_controller.ask(goal, maxIterations=max_iterations, reporter=reporter)
+    )
     interrupted = False
+    termination_reason = "unknown"
+    success = False
     try:
         llm_event_loop.run_until_complete(task)
+        if hasattr(llm_controller, "last_session_outcome"):
+            outcome = llm_controller.last_session_outcome or {}
+            termination_reason = str(outcome.get("termination_reason") or "ended")
+            success = bool(outcome.get("success", False))
+        else:
+            termination_reason = "ended"
     except KeyboardInterrupt:
         interrupted = True
+        termination_reason = "interrupted"
         print("\nInterrupt requested. Stopping current LLM session...")
         try:
             llm_controller.interrupt()
@@ -495,7 +518,33 @@ def run_llm_goal(
             pass
         except Exception:
             pass
+    except Exception as exc:
+        termination_reason = f"error:{type(exc).__name__}"
+        success = False
+        logger.warning("LLM goal run failed: %s", exc)
+    finally:
+        if reporter is not None:
+            try:
+                if interrupted:
+                    success = False
+                reporter.finalize(success=success, termination_reason=termination_reason)
+            except Exception:
+                logger.warning("Failed to finalize experiment report", exc_info=True)
+
     return interrupted
+
+
+def get_active_system_prompt(chat) -> str | None:
+    getter = getattr(chat, "get_system_instruction", None)
+    if not callable(getter):
+        return None
+    try:
+        prompt = getter()
+    except Exception:
+        return None
+    if not isinstance(prompt, str):
+        return None
+    return prompt
 
 
 def main() -> int:
@@ -616,7 +665,24 @@ def main() -> int:
                 continue
 
             print(f"goal> {line}")
-            interrupted = run_llm_goal(llm_event_loop, llm_controller, line, args.max_iterations)
+            run_reporter = None
+            if not args.disable_experiment_reporting:
+                run_reporter = ExperimentReporter(experiments_dir=args.experiments_dir)
+                run_reporter.start(
+                    goal_text=line,
+                    mode=mode,
+                    llm_provider=args.llm_provider,
+                    llm_model=chat.get_model_name() if "chat" in locals() else None,
+                    system_prompt=get_active_system_prompt(chat) if "chat" in locals() else None,
+                )
+
+            interrupted = run_llm_goal(
+                llm_event_loop,
+                llm_controller,
+                line,
+                args.max_iterations,
+                reporter=run_reporter,
+            )
             if interrupted:
                 print("LLM session interrupted.")
             print(format_state(executor.get_state()))

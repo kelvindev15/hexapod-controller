@@ -218,3 +218,6 @@ snapshots/
 yolov8n.pt
 mlruns
 
+
+experiments/
+

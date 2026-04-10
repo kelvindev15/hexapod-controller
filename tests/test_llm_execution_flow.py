@@ -146,6 +146,14 @@ class FailingMotionExecutor(FakeMotionExecutor):
         raise RuntimeError("submit failed")
 
 
+class FakeReporter:
+    def __init__(self):
+        self.events = []
+
+    def log_event(self, event_type, **payload):
+        self.events.append({"event_type": event_type, **payload})
+
+
 class LLMExecutionFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_action_normalization_from_numeric_parameters(self):
         chat = FakeChat([
@@ -310,6 +318,25 @@ class LLMExecutionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(executor.started)
         self.assertEqual(len(executor.submitted), 1)
         self.assertEqual(executor.submitted[0].type, ActionType.WALK)
+
+    async def test_orchestration_emits_experiment_events(self):
+        chat = FakeChat([
+            '{"goal": "advance", "scene_description": "clear", "reasoning": "move now", "action": {"command": "FRONT", "parameters": {"value": 10}}}',
+            '{"goal": "advance", "scene_description": "done", "reasoning": "goal reached", "action": {"command": "COMPLETE"}}'
+        ])
+        robot = FakeRobot()
+        executor = FakeMotionExecutor()
+        reporter = FakeReporter()
+        controller = LLMRobotController(robotController=robot, chat=chat, motionExecutor=executor, reporter=reporter)
+
+        await controller.ask("reach target", maxIterations=3)
+
+        event_types = [item["event_type"] for item in reporter.events]
+        self.assertIn("session_start", event_types)
+        self.assertIn("llm_iteration", event_types)
+        self.assertIn("action_proposed", event_types)
+        self.assertIn("action_executed", event_types)
+        self.assertIn("session_end", event_types)
 
     async def test_controller_session_can_be_interrupted(self):
         chat = SlowChat(delay_seconds=1.0)
