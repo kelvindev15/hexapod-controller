@@ -1,4 +1,3 @@
-from langchain_core.messages import HumanMessage, SystemMessage
 import os
 from pathlib import Path
 
@@ -61,7 +60,7 @@ def getOpenAIKey():
 
 
 def create_sys_message(text: str):
-    return SystemMessage(content=text)
+    return {"role": "system", "content": text}
 
 
 def create_message(text: str, image: str = None):
@@ -76,4 +75,4 @@ def create_message(text: str, image: str = None):
             "type": "image_url",
             "image_url": {"url": f"data:image/jpeg;base64,{image}"},
         })
-    return HumanMessage(content=message_content)
+    return {"role": "user", "content": message_content}

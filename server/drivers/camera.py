@@ -1,11 +1,20 @@
 import time
 import logging
-from picamera2 import Picamera2, Preview
-from picamera2.encoders import H264Encoder, JpegEncoder
-from picamera2.outputs import FileOutput
-from libcamera import Transform
 from threading import Condition
 import io
+
+try:
+    from picamera2 import Picamera2, Preview
+    from picamera2.encoders import H264Encoder, JpegEncoder
+    from picamera2.outputs import FileOutput
+    from libcamera import Transform
+except ImportError:
+    Picamera2 = None
+    Preview = None
+    H264Encoder = None
+    JpegEncoder = None
+    FileOutput = None
+    Transform = None
 
 
 logger = logging.getLogger(__name__)
@@ -26,6 +35,9 @@ class StreamingOutput(io.BufferedIOBase):
 class Camera:
     def __init__(self, preview_size: tuple = (640, 480), hflip: bool = False, vflip: bool = False, stream_size: tuple = (400, 300)):
         """Initialize the Camera class."""
+        if Picamera2 is None or Transform is None:
+            raise RuntimeError("picamera2 is not available on this system")
+
         try:
             self.camera = Picamera2()  # Initialize the Picamera2 object
         except IndexError:

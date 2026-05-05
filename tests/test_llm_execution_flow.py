@@ -181,6 +181,22 @@ class LLMExecutionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.value.metadata["command"], "FRONT")
         self.assertEqual(result.value.params["y"], 8.0)
 
+    async def test_action_parsing_accepts_list_based_llm_payload(self):
+        chat = FakeChat([
+            [{
+                "type": "text",
+                "text": '{"goal": "spin", "scene_description": "clear", "reasoning": "turn in place", "action": {"command": "ROTATE_RIGHT", "params": {"value": 360}}}'
+            }]
+        ])
+        adapter = LLMAdapter(chat)
+
+        result = await adapter.iterate("turn 360 degrees", "image")
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.value.type, ActionType.WALK)
+        self.assertEqual(result.value.metadata["command"], "ROTATE_RIGHT")
+        self.assertEqual(result.value.params["angle"], 360.0)
+
     async def test_action_uses_llm_selected_speed_and_ttl(self):
         chat = FakeChat([
             '{"goal": "move", "scene_description": "clear", "reasoning": "safe", "action": {"command": "FRONT", "params": {"value": 12, "speed": 7, "ttl": 2.5}}}'
@@ -333,10 +349,16 @@ class LLMExecutionFlowTests(unittest.IsolatedAsyncioTestCase):
 
         event_types = [item["event_type"] for item in reporter.events]
         self.assertIn("session_start", event_types)
+        self.assertIn("llm_message_sent", event_types)
+        self.assertIn("llm_message_received", event_types)
         self.assertIn("llm_iteration", event_types)
         self.assertIn("action_proposed", event_types)
         self.assertIn("action_executed", event_types)
         self.assertIn("session_end", event_types)
+
+        action_events = [item for item in reporter.events if item["event_type"] == "action_executed"]
+        self.assertTrue(action_events)
+        self.assertGreaterEqual(action_events[0].get("execution_duration_ms", -1), 0)
 
     async def test_controller_session_can_be_interrupted(self):
         chat = SlowChat(delay_seconds=1.0)

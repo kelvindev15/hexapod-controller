@@ -3,7 +3,7 @@ import sys
 import time
 flag=0x00
 for x in range(1,4):
-	if os.system("pip3 install --upgrade langchain-google-genai google-genai") == 0:
+	if os.system("pip3 install --upgrade openai google-genai ollama") == 0:
 		flag=flag | 0x01
 		break
 for x in range(1,4):
@@ -27,7 +27,11 @@ for x in range(1,4):
 	if os.system("pip3 install numpy") == 0:
 		flag=flag | 0x20
 		break
-if flag==0x3f:
+for x in range(1,4):
+	if os.system("pip3 install python-dotenv") == 0:
+		flag=flag | 0x40
+		break
+if flag==0x7f:
 		os.system("pip3 list && pause")
 		print("\nAll libraries installed successfully")
 else:

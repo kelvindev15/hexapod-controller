@@ -1,6 +1,8 @@
 import asyncio
+import hashlib
 import uuid
 import logging
+import time
 from dataclasses import asdict, is_dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
@@ -135,6 +137,60 @@ class LLMRobotController:
         except Exception:
             logger.warning("Experiment reporter failed for event_type=%s", event_type, exc_info=True)
 
+    def _image_fingerprint(self, image_b64: str | None) -> str | None:
+        if not image_b64:
+            return None
+        try:
+            digest = hashlib.sha256(image_b64.encode("utf-8", errors="ignore")).hexdigest()
+            return digest[:16]
+        except Exception:
+            logger.debug("Failed generating image fingerprint", exc_info=True)
+            return None
+
+    async def _iterate_with_reporting(
+        self,
+        *,
+        goal_text: str,
+        prompt_text: str,
+        image_b64: str,
+        chat_id: str,
+        iteration_index: int,
+    ):
+        interaction_id = str(uuid.uuid4())
+        llm_image_id = self._image_fingerprint(image_b64)
+        self._report_event(
+            "llm_message_sent",
+            goal_text=goal_text,
+            chat_id=chat_id,
+            session_id=chat_id,
+            iteration_index=iteration_index,
+            interaction_id=interaction_id,
+            llm_image_id=llm_image_id,
+            prompt_length_chars=len(prompt_text or ""),
+            image_length_chars=len(image_b64 or ""),
+        )
+
+        started = time.monotonic()
+        response = await self.llmAdapter.iterate(prompt_text, image_b64)
+        latency_ms = max(0, int((time.monotonic() - started) * 1000))
+
+        self._report_event(
+            "llm_message_received",
+            goal_text=goal_text,
+            chat_id=chat_id,
+            session_id=chat_id,
+            iteration_index=iteration_index,
+            interaction_id=interaction_id,
+            llm_image_id=llm_image_id,
+            latency_ms=latency_ms,
+            llm_success=bool(response.ok),
+            llm_action_candidate=self._to_serializable(response.value) if response.ok else None,
+            error_type=(type(response.error).__name__ if response.error is not None else None),
+            error_message=(str(response.error) if response.error is not None else None),
+        )
+
+        return response, interaction_id, llm_image_id
+
     def __buildSceneDescription(self, prompt = None) -> str:
         preamble = "This is the new scene."
         if prompt is not None:
@@ -181,10 +237,12 @@ class LLMRobotController:
         chat_id = str(uuid.uuid4())
         session_reporter = reporter if reporter is not None else self.reporter
         self.llmAdapter.clear()
-        self.chat.set_chat_id(chat_id)
+        self.chat.chat_id = chat_id
         logger.info("LLM session started chat_id=%s max_iterations=%d", chat_id, maxIterations)
         iterations = 0
         termination_reason = "unknown"
+        active_interaction_id: str | None = None
+        active_llm_image_id: str | None = None
 
         if session_reporter is not None:
             self.reporter = session_reporter
@@ -200,7 +258,13 @@ class LLMRobotController:
                 termination_reason = "interrupted_before_start"
                 return
             scene, image = await self.__gather_scene_and_image(prompt)
-            response = await self.llmAdapter.iterate(scene, image)
+            response, active_interaction_id, active_llm_image_id = await self._iterate_with_reporting(
+                goal_text=prompt,
+                prompt_text=scene,
+                image_b64=image,
+                chat_id=chat_id,
+                iteration_index=0,
+            )
             while (
                 iterations < maxIterations
                 and not self._interrupt_requested
@@ -223,11 +287,14 @@ class LLMRobotController:
                         chat_id=chat_id,
                         session_id=chat_id,
                         iteration_index=iterations,
+                        interaction_id=active_interaction_id,
+                        llm_image_id=active_llm_image_id,
                         action_proposed=self._to_serializable(response.value),
                         world_state_before=world_state_before,
                     )
                     decision = self.actionAdapter.assess_safety(response.value, await self.__getLidarImage(30, 0))
                     if decision.is_safe:
+                        exec_started = time.monotonic()
                         try:
                             actionTask = asyncio.create_task(self.actionAdapter.execute(response.value))
                             await asyncio.wait_for(actionTask, 30)
@@ -251,24 +318,31 @@ class LLMRobotController:
                                 chat_id=chat_id,
                                 session_id=chat_id,
                                 iteration_index=iterations,
+                                interaction_id=active_interaction_id,
+                                llm_image_id=active_llm_image_id,
                                 action_executed=self._to_serializable(response.value),
                                 execution_status="timeout",
+                                execution_duration_ms=max(0, int((time.monotonic() - exec_started) * 1000)),
                                 world_state_before=world_state_before,
                                 world_state_after=self._safe_world_state(),
                             )
                             break
 
                         actionResult = await actionTask
+                        execution_duration_ms = max(0, int((time.monotonic() - exec_started) * 1000))
                         self._report_event(
                             "action_executed",
                             goal_text=prompt,
                             chat_id=chat_id,
                             session_id=chat_id,
                             iteration_index=iterations,
+                            interaction_id=active_interaction_id,
+                            llm_image_id=active_llm_image_id,
                             action_executed=self._to_serializable(response.value),
                             execution_status=(
                                 "success" if actionResult.status == ActionStatus.SUCCESS else "failure"
                             ),
+                            execution_duration_ms=execution_duration_ms,
                             error_message=actionResult.message if actionResult.status != ActionStatus.SUCCESS else None,
                             world_state_before=world_state_before,
                             world_state_after=self._safe_world_state(),
@@ -285,7 +359,13 @@ class LLMRobotController:
                             break
                         if actionResult.status == ActionStatus.SUCCESS:
                             scene, image = await self.__gather_scene_and_image(prompt)
-                            response = await self.llmAdapter.iterate(scene, image)
+                            response, active_interaction_id, active_llm_image_id = await self._iterate_with_reporting(
+                                goal_text=prompt,
+                                prompt_text=scene,
+                                image_b64=image,
+                                chat_id=chat_id,
+                                iteration_index=iterations,
+                            )
                         else:
                             logger.warning("Action execution failed chat_id=%s reason=%s", chat_id, actionResult.message)
                             termination_reason = "action_execution_failed"
@@ -304,6 +384,8 @@ class LLMRobotController:
                             chat_id=chat_id,
                             session_id=chat_id,
                             iteration_index=iterations,
+                            interaction_id=active_interaction_id,
+                            llm_image_id=active_llm_image_id,
                             action_proposed=self._to_serializable(response.value),
                             safety_decision="rejected",
                             safety_reason=decision.reason,
@@ -315,7 +397,13 @@ class LLMRobotController:
                             "Please provide a different safe action."
                         )
                         scene, image = await self.__gather_scene_and_image(f"{prompt}\n{message}")
-                        response = await self.llmAdapter.iterate(scene, image)
+                        response, active_interaction_id, active_llm_image_id = await self._iterate_with_reporting(
+                            goal_text=prompt,
+                            prompt_text=scene,
+                            image_b64=image,
+                            chat_id=chat_id,
+                            iteration_index=iterations,
+                        )
                 elif not response.ok:
                     if self._is_provider_throttle_error(response.error):
                         logger.warning(
@@ -330,6 +418,8 @@ class LLMRobotController:
                             chat_id=chat_id,
                             session_id=chat_id,
                             iteration_index=iterations,
+                            interaction_id=active_interaction_id,
+                            llm_image_id=active_llm_image_id,
                             error_type=type(response.error).__name__,
                             error_message=str(response.error),
                         )
@@ -341,6 +431,8 @@ class LLMRobotController:
                         chat_id=chat_id,
                         session_id=chat_id,
                         iteration_index=iterations,
+                        interaction_id=active_interaction_id,
+                        llm_image_id=active_llm_image_id,
                         error_type=type(response.error).__name__,
                         error_message=str(response.error),
                     )
@@ -350,7 +442,13 @@ class LLMRobotController:
                         f"Received Error: {response.error}\n"
                     )
                     scene, image = await self.__gather_scene_and_image(f"{prompt}\n{message}")
-                    response = await self.llmAdapter.iterate(scene, image)
+                    response, active_interaction_id, active_llm_image_id = await self._iterate_with_reporting(
+                        goal_text=prompt,
+                        prompt_text=scene,
+                        image_b64=image,
+                        chat_id=chat_id,
+                        iteration_index=iterations,
+                    )
             if termination_reason == "unknown":
                 if self._interrupt_requested:
                     termination_reason = "interrupted"
@@ -380,7 +478,7 @@ class LLMRobotController:
                 session_id=chat_id,
                 iteration_index=iterations,
             )
-        except Exception:
+        except Exception as exc:
             termination_reason = "error"
             logger.exception("Error in LLMRobotController.ask chat_id=%s", chat_id)
             self._report_event(
@@ -389,6 +487,10 @@ class LLMRobotController:
                 chat_id=chat_id,
                 session_id=chat_id,
                 iteration_index=iterations,
+                interaction_id=active_interaction_id,
+                llm_image_id=active_llm_image_id,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
             )
         finally:
             self._session_task = None

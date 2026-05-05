@@ -32,7 +32,7 @@ class Result(Generic[T]):
 
 class InvalidJSON(Exception):
     """Raised when the LLM response doesn't contain valid JSON."""
-    def __init__(self, raw: str):
+    def __init__(self, raw):
         super().__init__("Invalid JSON from model")
         self.raw = raw
 
@@ -152,13 +152,9 @@ class LLMAdapter:
         return self._default_system_instruction()
 
     def _install_system_instruction(self, system_prompt: str | None = None, system_prompt_file: str | None = None) -> None:
-        if not hasattr(self.chat, "set_system_instruction"):
-            return
-        if not callable(getattr(self.chat, "set_system_instruction", None)):
-            return
-
-        self.chat.set_system_instruction(
-            self._resolve_system_instruction(system_prompt=system_prompt, system_prompt_file=system_prompt_file)
+        self.chat.system_instruction = self._resolve_system_instruction(
+            system_prompt=system_prompt,
+            system_prompt_file=system_prompt_file,
         )
 
     def _to_float_or_none(self, value):

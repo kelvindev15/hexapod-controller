@@ -1,7 +1,48 @@
 import json
 import re
+from typing import Any
 
-def extractJSON(text: str):
+def _normalize_llm_text_payload(payload: Any) -> str:
+    if isinstance(payload, str):
+        return payload
+
+    if isinstance(payload, bytes):
+        return payload.decode("utf-8", errors="replace")
+
+    if isinstance(payload, list):
+        parts: list[str] = []
+        for item in payload:
+            if isinstance(item, dict):
+                if item.get("type") == "text" and item.get("text") is not None:
+                    parts.append(str(item.get("text")))
+                    continue
+                if item.get("text") is not None:
+                    parts.append(str(item.get("text")))
+                    continue
+                if item.get("content") is not None:
+                    parts.append(_normalize_llm_text_payload(item.get("content")))
+                    continue
+            elif isinstance(item, str):
+                parts.append(item)
+                continue
+
+            parts.append(str(item))
+
+        return "\n".join(part for part in parts if part).strip()
+
+    if isinstance(payload, dict):
+        if payload.get("text") is not None:
+            return str(payload.get("text"))
+        if payload.get("content") is not None:
+            return _normalize_llm_text_payload(payload.get("content"))
+        return json.dumps(payload)
+
+    return str(payload)
+
+
+def extractJSON(text: Any):
+    text = _normalize_llm_text_payload(text)
+
     # Prefer fenced JSON blocks first.
     fenced = re.search(r"```json\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
     if fenced:

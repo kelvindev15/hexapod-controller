@@ -22,11 +22,9 @@ class ExperimentReporter:
         self,
         experiments_dir: str = "experiments",
         schema_version: str = SCHEMA_VERSION,
-        enable_mlflow_artifacts: bool = True,
     ):
         self.experiments_dir = experiments_dir
         self.schema_version = schema_version
-        self.enable_mlflow_artifacts = enable_mlflow_artifacts
 
         self.run_id: str | None = None
         self.run_dir: str | None = None
@@ -42,7 +40,15 @@ class ExperimentReporter:
             "invalid_response_count": 0,
             "action_execution_failures": 0,
             "throttle_events": 0,
+            "llm_interaction_count": 0,
+            "llm_interaction_latency_total_ms": 0,
+            "llm_interaction_latency_max_ms": 0,
+            "action_execution_count": 0,
+            "action_execution_latency_total_ms": 0,
+            "action_execution_latency_max_ms": 0,
+            "errors_total": 0,
         }
+        self._action_history: list[dict[str, Any]] = []
         self._lock = threading.Lock()
 
     def start(self, goal_text: str, **context: Any) -> str | None:
@@ -128,6 +134,22 @@ class ExperimentReporter:
                 "invalid_response_count": int(self._counters["invalid_response_count"]),
                 "action_execution_failures": int(self._counters["action_execution_failures"]),
                 "throttle_events": int(self._counters["throttle_events"]),
+                "llm_interaction_count": int(self._counters["llm_interaction_count"]),
+                "llm_interaction_latency_total_ms": int(self._counters["llm_interaction_latency_total_ms"]),
+                "llm_interaction_latency_avg_ms": self._safe_avg(
+                    self._counters["llm_interaction_latency_total_ms"],
+                    self._counters["llm_interaction_count"],
+                ),
+                "llm_interaction_latency_max_ms": int(self._counters["llm_interaction_latency_max_ms"]),
+                "action_execution_count": int(self._counters["action_execution_count"]),
+                "action_execution_latency_total_ms": int(self._counters["action_execution_latency_total_ms"]),
+                "action_execution_latency_avg_ms": self._safe_avg(
+                    self._counters["action_execution_latency_total_ms"],
+                    self._counters["action_execution_count"],
+                ),
+                "action_execution_latency_max_ms": int(self._counters["action_execution_latency_max_ms"]),
+                "errors_total": int(self._counters["errors_total"]),
+                "action_history": self._action_history,
                 "mode": self._base_fields.get("mode"),
                 "llm_provider": self._base_fields.get("llm_provider"),
                 "llm_model": self._base_fields.get("llm_model"),
@@ -146,8 +168,6 @@ class ExperimentReporter:
                 logger.warning("Failed writing experiment summary run_id=%s", self.run_id, exc_info=True)
                 return
 
-            self._log_mlflow_artifacts_best_effort()
-
     def _update_counters(self, event: dict[str, Any]) -> None:
         event_type = str(event.get("event_type") or "")
         if event_type == "llm_iteration":
@@ -158,24 +178,75 @@ class ExperimentReporter:
             self._counters["invalid_response_count"] += 1
         if event_type == "provider_throttle":
             self._counters["throttle_events"] += 1
+        if event_type == "llm_message_received":
+            self._counters["llm_interaction_count"] += 1
+            latency_ms = self._to_non_negative_int(event.get("latency_ms"))
+            self._counters["llm_interaction_latency_total_ms"] += latency_ms
+            self._counters["llm_interaction_latency_max_ms"] = max(
+                self._counters["llm_interaction_latency_max_ms"],
+                latency_ms,
+            )
+        if event_type == "action_executed":
+            self._counters["action_execution_count"] += 1
+            duration_ms = self._to_non_negative_int(event.get("execution_duration_ms"))
+            self._counters["action_execution_latency_total_ms"] += duration_ms
+            self._counters["action_execution_latency_max_ms"] = max(
+                self._counters["action_execution_latency_max_ms"],
+                duration_ms,
+            )
+            action_record = {
+                "timestamp": event.get("timestamp"),
+                "iteration_index": event.get("iteration_index"),
+                "interaction_id": event.get("interaction_id"),
+                "llm_image_id": event.get("llm_image_id"),
+                "action": event.get("action_executed"),
+                "execution_status": event.get("execution_status"),
+                "execution_duration_ms": duration_ms,
+                "error_message": event.get("error_message"),
+            }
+            self._action_history.append(self._sanitize(action_record))
+        if event_type == "action_rejected":
+            action_record = {
+                "timestamp": event.get("timestamp"),
+                "iteration_index": event.get("iteration_index"),
+                "interaction_id": event.get("interaction_id"),
+                "llm_image_id": event.get("llm_image_id"),
+                "action": event.get("action_proposed"),
+                "execution_status": "rejected",
+                "execution_duration_ms": 0,
+                "error_message": event.get("safety_reason"),
+            }
+            self._action_history.append(self._sanitize(action_record))
         if event_type == "action_executed" and str(event.get("execution_status", "")).lower() != "success":
             self._counters["action_execution_failures"] += 1
+        if self._is_error_event(event_type, event):
+            self._counters["errors_total"] += 1
 
-    def _log_mlflow_artifacts_best_effort(self) -> None:
-        if not self.enable_mlflow_artifacts:
-            return
-        if self.events_path is None or self.summary_path is None:
-            return
+    def _is_error_event(self, event_type: str, event: dict[str, Any]) -> bool:
+        if event_type in {
+            "session_error",
+            "llm_invalid_response",
+            "provider_throttle",
+            "action_rejected",
+        }:
+            return True
+        if event_type == "action_executed" and str(event.get("execution_status", "")).lower() != "success":
+            return True
+        if event.get("error_type") is not None or event.get("error_message") is not None:
+            return True
+        return False
 
+    def _to_non_negative_int(self, value: Any) -> int:
         try:
-            import mlflow  # type: ignore
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, parsed)
 
-            mlflow.log_artifact(self.events_path, artifact_path="experiment_reports")
-            mlflow.log_artifact(self.summary_path, artifact_path="experiment_reports")
-        except ImportError:
-            return
-        except Exception:
-            logger.warning("Failed logging experiment artifacts to MLflow run_id=%s", self.run_id, exc_info=True)
+    def _safe_avg(self, total: int, count: int) -> float:
+        if count <= 0:
+            return 0.0
+        return round(float(total) / float(count), 3)
 
     def _generate_run_id(self) -> str:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")

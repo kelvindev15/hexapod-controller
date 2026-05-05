@@ -44,6 +44,12 @@ python interactive_runner.py --dry-run --llm-provider openai
   - Requires local Ollama server + model available
   - Optional model override: `--llm-model llava`
 
+### LangSmith Tracing
+
+- Set `LANGSMITH_API_KEY` to enable LangSmith traces for LLM calls.
+- Optional: set `LANGSMITH_PROJECT` to group runs under a custom project name.
+- The runner enables LangSmith tracing automatically when an API key is present.
+
 ### CLI Commands vs Natural Language
 
 - Input starting with `/` is treated as a direct command:
@@ -80,10 +86,8 @@ python interactive_runner.py --dry-run --llm-provider openai
 ### Env Vars
 
 - `HEXAPOD_ROBOT_URL` sets default robot URL for remote mode (`http://127.0.0.1:8080` by default).
-- `HEXAPOD_ENABLE_MLFLOW_AUTOLOG` toggles MLflow autologging globally (`1` by default, set `0` to disable).
-- `HEXAPOD_MLFLOW_AUTOLOG_MODE` controls MLflow mode: `langchain` (default, safer for async LLM loops) or `generic` (broader patching, may be noisy in some async contexts).
-- `HEXAPOD_MLFLOW_USER_ID` sets the logical user ID attached to trace metadata (`mlflow.trace.user`).
-- Each LLM session is tagged with `mlflow.trace.session` using the controller-generated chat/session UUID.
+- `LANGSMITH_API_KEY` enables LangSmith tracing.
+- `LANGSMITH_PROJECT` sets the LangSmith project name used by traces.
 
 ## Robot/Host Architecture Split
 
