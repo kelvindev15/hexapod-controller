@@ -240,6 +240,16 @@ class LLMExecutionFlowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(chat.system_instruction)
         self.assertIn("valid JSON object", chat.system_instruction)
+        self.assertIn("30 for all walking commands", chat.system_instruction)
+        self.assertIn("20 for all rotation commands", chat.system_instruction)
+
+    async def test_adapter_loads_repo_system_prompt_file_with_fixed_magnitudes(self):
+        chat = FakeChat(["{}"])
+        LLMAdapter(chat, system_prompt_file="system_prompt.txt")
+
+        self.assertIsNotNone(chat.system_instruction)
+        self.assertIn("Use 30 for all walking commands", chat.system_instruction)
+        self.assertIn("Use 20 for all rotation commands", chat.system_instruction)
 
     async def test_scene_description_uses_sensor_profile_section_count(self):
         _distance_call_args.clear()

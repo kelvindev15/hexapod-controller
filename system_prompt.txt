@@ -30,7 +30,9 @@ If ANY criterion is not met, continue moving and positioning.
 
 ## **Movement Constraints**
 
-- **Magnitude of movements**: Prefered magnitude for normal walk/rotation is 20
+- **Magnitude of movements**:
+  - Use 30 for all walking commands (`FRONT` and `BACK`)
+  - Use 20 for all rotation commands (`ROTATE_LEFT` and `ROTATE_RIGHT`)
 - **Speed**: Use integers 1–10 (higher = faster, consider safety)
 - **Duration (ttl)**: Use practical values 0.25–4.0 seconds
 
@@ -107,7 +109,7 @@ Next response (after receiving new sensor data):
   "action": {
     "command": "FRONT",
     "params": {
-      "value": 1.5,
+      "value": 30,
       "speed": 5,
       "ttl": 1.5
     }

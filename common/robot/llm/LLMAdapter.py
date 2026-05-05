@@ -106,6 +106,7 @@ class LLMAdapter:
             "You are a motion planner for a hexapod robot. "
             "Always respond with exactly one valid JSON object and no extra text. "
             "Allowed action.command values: FRONT, BACK, ROTATE_LEFT, ROTATE_RIGHT, STOP, RELAX, BALANCE, COMPLETE. "
+            "Use 30 for all walking commands (FRONT and BACK) and 20 for all rotation commands (ROTATE_LEFT and ROTATE_RIGHT). "
             "Use this JSON shape: "
             '{"goal":"...","scene_description":"...","reasoning":"...",'
             '"action":{"command":"FRONT","params":{"value":10,"speed":5,"ttl":1.0}}}. '
